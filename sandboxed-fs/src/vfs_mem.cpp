@@ -1,10 +1,9 @@
 #include "sandboxed-fs/vfs_mem.hpp"
 
-#include <algorithm>
 #include <cerrno>
 #include <ctime>
 #include <expected>
-#include <sstream>
+#include <string_view>
 
 namespace sandboxed_fs {
 
@@ -12,15 +11,22 @@ static std::vector<std::string> splitPath(const std::string &path) {
   std::vector<std::string> parts;
   if (path.empty() || path == "/")
     return parts;
-  std::string p = path;
-  if (p[0] == '/' || p[0] == '\\')
-    p = p.substr(1);
-  std::replace(p.begin(), p.end(), '\\', '/');
-  std::istringstream ss(p);
-  std::string part;
-  while (std::getline(ss, part, '/')) {
-    if (!part.empty() && part != ".")
-      parts.push_back(part);
+
+  std::string_view sv = path;
+  if (sv[0] == '/' || sv[0] == '\\')
+    sv.remove_prefix(1);
+
+  size_t start = 0;
+  for (size_t i = 0; i <= sv.size(); ++i) {
+    char c = (i == sv.size()) ? '/' : sv[i];
+    if (c == '/' || c == '\\') {
+      if (i > start) {
+        auto seg = sv.substr(start, i - start);
+        if (seg != ".")
+          parts.emplace_back(seg);
+      }
+      start = i + 1;
+    }
   }
   return parts;
 }
@@ -71,18 +77,16 @@ std::expected<MemFSBackend::Node *const, int> MemFSBackend::parentDir(const std:
   if (parts.empty())
     return m_root.get();
 
-  std::string parentPath = "/";
-  for (size_t i = 0; i < parts.size(); ++i) {
-    if (i > 0)
-      parentPath += "/";
-    parentPath += parts[i];
+  Node *node = m_root.get();
+  for (const auto &part : parts) {
+    auto it = node->children.find(part);
+    if (it == node->children.end())
+      return std::unexpected(ENOENT);
+    node = it->second.get();
   }
-  auto w = walkTo(parentPath);
-  if (!w)
-    return std::unexpected(w.error());
-  if (!w->node->stat.isDir())
+  if (!node->stat.isDir())
     return std::unexpected(ENOTDIR);
-  return w->node;
+  return node;
 }
 
 std::expected<std::string, int> MemFSBackend::readFile(const std::string &path) {
@@ -114,26 +118,28 @@ std::expected<void, int> MemFSBackend::writeFile(const std::string &path, const 
     return std::unexpected(p.error());
 
   auto now = nowMs();
-  auto &entry = (*p)->children[fileName];
-  if (!entry) {
-    entry = std::make_unique<Node>();
-    entry->stat.dev = 0;
-    entry->stat.ino = m_nextIno++;
-    entry->stat.mode = 0100644;
-    entry->stat.nlink = 1;
-    entry->stat.uid = 1000;
-    entry->stat.gid = 1000;
-    entry->stat.atimeMs = now;
-    entry->stat.mtimeMs = now;
-    entry->stat.ctimeMs = now;
-  } else if (entry->stat.isDir()) {
-    return std::unexpected(EISDIR);
+  auto it = (*p)->children.find(fileName);
+  if (it != (*p)->children.end()) {
+    if (it->second->stat.isDir())
+      return std::unexpected(EISDIR);
+  } else {
+    auto node = std::make_unique<Node>();
+    node->stat.dev = 0;
+    node->stat.ino = m_nextIno++;
+    node->stat.mode = 0100644;
+    node->stat.nlink = 1;
+    node->stat.uid = 1000;
+    node->stat.gid = 1000;
+    node->stat.atimeMs = now;
+    node->stat.mtimeMs = now;
+    node->stat.ctimeMs = now;
+    it = (*p)->children.emplace(fileName, std::move(node)).first;
   }
 
   const auto *buf = static_cast<const uint8_t *>(data);
-  entry->data.assign(buf, buf + len);
-  entry->stat.size = static_cast<int64_t>(len);
-  entry->stat.mtimeMs = now;
+  it->second->data.assign(buf, buf + len);
+  it->second->stat.size = static_cast<int64_t>(len);
+  it->second->stat.mtimeMs = now;
   return {};
 }
 
@@ -148,16 +154,16 @@ std::expected<void, int> MemFSBackend::appendFile(const std::string &path, const
     return std::unexpected(p.error());
 
   auto now = nowMs();
-  auto &entry = (*p)->children[fileName];
-  if (!entry)
+  auto it = (*p)->children.find(fileName);
+  if (it == (*p)->children.end())
     return writeFile(path, data, len);
-  if (entry->stat.isDir())
+  if (it->second->stat.isDir())
     return std::unexpected(EISDIR);
 
   const auto *buf = static_cast<const uint8_t *>(data);
-  entry->data.insert(entry->data.end(), buf, buf + len);
-  entry->stat.size = static_cast<int64_t>(entry->data.size());
-  entry->stat.mtimeMs = now;
+  it->second->data.insert(it->second->data.end(), buf, buf + len);
+  it->second->stat.size = static_cast<int64_t>(it->second->data.size());
+  it->second->stat.mtimeMs = now;
   return {};
 }
 
@@ -208,8 +214,7 @@ std::expected<void, int> MemFSBackend::mkdir(const std::string &path, bool recur
     }
     current->stat.mode = 0x4000 | (mode & 0777);
   } else {
-    auto partsCopy = parts;
-    std::string fileName = partsCopy.back();
+    std::string fileName = parts.back();
 
     auto p = parentDir(path);
     if (!p)
