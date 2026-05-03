@@ -9,22 +9,6 @@
 namespace sfs = sandboxed_fs;
 namespace fs = std::filesystem;
 
-// POSIX headers (included transitively by GTest on macOS) may #define
-// F_OK / R_OK / W_OK / X_OK as macros.  Undef them so our scoped
-// sfs::access_mode constants work.
-#ifdef F_OK
-#undef F_OK
-#endif
-#ifdef R_OK
-#undef R_OK
-#endif
-#ifdef W_OK
-#undef W_OK
-#endif
-#ifdef X_OK
-#undef X_OK
-#endif
-
 #define EXPECT_ERR(expr, errCode)                                                                                                                    \
   do {                                                                                                                                               \
     auto _r = (expr);                                                                                                                                \
@@ -110,8 +94,8 @@ TEST_F(MemFSSecurityTest, ReaddirEscape) {
 }
 
 TEST_F(MemFSSecurityTest, AccessEscape) {
-  EXPECT_EQ(fs.access("/../nonexistent", sfs::access_mode::F_OK), ENOENT);
-  EXPECT_EQ(fs.access("/../../etc/passwd", sfs::access_mode::R_OK), ENOENT);
+  EXPECT_EQ(fs.access("/../nonexistent", sfs::access_mode::kExist), ENOENT);
+  EXPECT_EQ(fs.access("/../../etc/passwd", sfs::access_mode::kRead), ENOENT);
 }
 
 TEST_F(MemFSSecurityTest, MkdirEscape) { EXPECT_ERR(fs.mkdir("/../outside", false), ENOENT); }
@@ -161,8 +145,9 @@ protected:
 TEST_F(RealFSSecurityTest, DotDotEscape) {
   sfs::RealFSBackend realFs(sandboxDir);
   EXPECT_ERR(realFs.readFile("/../outside/secret.txt"), EACCES);
-  // Two levels up — the resolved path doesn't exist → canonical fails.
-  EXPECT_ERR(realFs.readFile("/../../outside/secret.txt"), ENOENT);
+  // Two levels up resolves outside — side-channel guard returns EACCES
+  // (not ENOENT) so existence of outside files cannot be probed.
+  EXPECT_ERR(realFs.readFile("/../../outside/secret.txt"), EACCES);
 }
 
 TEST_F(RealFSSecurityTest, DotPathConfusion) {
@@ -247,7 +232,7 @@ TEST_F(RealFSSecurityTest, UtimesEscape) {
 
 TEST_F(RealFSSecurityTest, AccessEscape) {
   sfs::RealFSBackend realFs(sandboxDir);
-  EXPECT_EQ(realFs.access("/../outside/secret.txt", sfs::access_mode::F_OK), EACCES);
+  EXPECT_EQ(realFs.access("/../outside/secret.txt", sfs::access_mode::kExist), EACCES);
 }
 
 TEST_F(RealFSSecurityTest, WeaklyCanonicalEscape) {
@@ -471,5 +456,5 @@ TEST_F(VirtualFSRealSecurityTest, UtimesOutsideViaPath) { EXPECT_ERR(vfs->utimes
 TEST_F(VirtualFSRealSecurityTest, ReaddirOutsideViaPath) { EXPECT_ERR(vfs->readdir("/home/sandbox/../outside"), EACCES); }
 
 TEST_F(VirtualFSRealSecurityTest, AccessOutsideViaPath) {
-  EXPECT_EQ(vfs->access("/home/sandbox/../outside/secret.txt", sfs::access_mode::F_OK), EACCES);
+  EXPECT_EQ(vfs->access("/home/sandbox/../outside/secret.txt", sfs::access_mode::kExist), EACCES);
 }

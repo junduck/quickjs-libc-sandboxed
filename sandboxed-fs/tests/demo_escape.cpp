@@ -104,6 +104,39 @@ static void test_real_symlink_dotdot(const fs::path &tmp) {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. RealFS — symlink escape via mkdir through symlink
+// ---------------------------------------------------------------------------
+
+static void test_real_symlink_mkdir_escape(const fs::path &tmp) {
+  heading("RealFS: mkdir through symlink escapes sandbox");
+
+  auto sandbox = tmp / "sandbox";
+  auto outside = tmp / "outside";
+  std::error_code ec;
+  fs::create_directories(sandbox, ec);
+  fs::create_directories(outside, ec);
+
+  sfs::RealFSBackend fs(sandbox);
+
+  fs::create_symlink(outside, sandbox / "link_dir");
+
+  auto r = fs.mkdir("/link_dir/escaped_dir", false);
+  if (!r.has_value()) {
+    ok("mkdir through symlink to outside blocked");
+  } else {
+    if (fs::exists(outside / "escaped_dir"))
+      bad("mkdir escaped sandbox — created directory outside");
+    else if (fs::exists(sandbox / "link_dir" / "escaped_dir"))
+      note("mkdir through symlink succeeded, target is inside sandbox");
+    else
+      note("mkdir succeeded but directory not in expected location");
+  }
+
+  fs::remove(sandbox / "link_dir", ec);
+  fs::remove_all(outside / "escaped_dir", ec);
+}
+
+// ---------------------------------------------------------------------------
 // 2. MemFS — readFileBytes should not destroy data
 // ---------------------------------------------------------------------------
 
@@ -458,6 +491,7 @@ int main() {
   std::cout << "==============================\n";
 
   test_real_symlink_dotdot(tmp);
+  test_real_symlink_mkdir_escape(tmp);
 
   test_mem_readfilebytes();
   test_mem_copyfile_overwrite_dir();

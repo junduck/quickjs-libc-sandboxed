@@ -119,9 +119,9 @@ std::expected<VirtualFS::Resolved, int> VirtualFS::resolve(const std::string &pa
 
 static Perm neededPermForAccess(int mode) {
   Perm p = Perm::None;
-  if (mode & access_mode::R_OK)
+  if (mode & access_mode::kRead)
     p = p | Perm::Read;
-  if (mode & access_mode::W_OK)
+  if (mode & access_mode::kWrite)
     p = p | Perm::Write;
   return p;
 }

@@ -45,12 +45,14 @@ struct Stat {
   bool isSock() const { return (mode & 0xF000) == 0xC000; }
 };
 
-// Standard access(2) mode constants.
+// Access mode flags for access().  Names deliberately avoid the POSIX
+// macro names F_OK / R_OK / W_OK / X_OK to prevent clashes when
+// client code includes <unistd.h>.
 namespace access_mode {
-constexpr int F_OK = 0;
-constexpr int R_OK = 4;
-constexpr int W_OK = 2;
-constexpr int X_OK = 1;
+constexpr int kExist = 0;
+constexpr int kRead  = 4;
+constexpr int kWrite = 2;
+constexpr int kExec  = 1;
 } // namespace access_mode
 
 } // namespace sandboxed_fs

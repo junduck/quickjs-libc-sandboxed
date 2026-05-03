@@ -375,15 +375,15 @@ int MemFSBackend::access(const std::string &path, int mode) {
   if (!w)
     return w.error();
 
-  if (mode == access_mode::F_OK)
+  if (mode == access_mode::kExist)
     return 0;
 
   uint32_t stMode = w->node->stat.mode;
-  if ((mode & access_mode::R_OK) && !(stMode & 0400))
+  if ((mode & access_mode::kRead) && !(stMode & 0400))
     return EACCES;
-  if ((mode & access_mode::W_OK) && !(stMode & 0200))
+  if ((mode & access_mode::kWrite) && !(stMode & 0200))
     return EACCES;
-  if ((mode & access_mode::X_OK) && !(stMode & 0100))
+  if ((mode & access_mode::kExec) && !(stMode & 0100))
     return EACCES;
 
   return 0;
