@@ -145,6 +145,23 @@ std::expected<std::string, int> RealFSBackend::resolveCreating(const std::string
     return std::unexpected(ec.value());
   if (!pathStartsWith(resolved, m_root))
     return std::unexpected(EACCES);
+
+  // Guard against dangling symlinks: weakly_canonical does not resolve
+  // symlink targets that don't exist, so a symlink pointing outside
+  // the sandbox would pass the prefix check.  Resolve the target.
+  auto linkSt = fs::symlink_status(resolved, ec);
+  if (!ec && fs::is_symlink(linkSt)) {
+    auto target = fs::read_symlink(resolved, ec);
+    if (ec)
+      return std::unexpected(ec.value());
+    auto absTarget = target.is_absolute() ? target : resolved.parent_path() / target;
+    auto canonTarget = fs::weakly_canonical(absTarget, ec);
+    if (ec)
+      return std::unexpected(EACCES);
+    if (!pathStartsWith(canonTarget, m_root))
+      return std::unexpected(EACCES);
+  }
+
   return resolved.string();
 }
 
