@@ -41,7 +41,7 @@ MemFSBackend::MemFSBackend() {
   m_root->stat.ctimeMs = now;
 }
 
-std::expected<MemFSBackend::WalkResult, int> MemFSBackend::walkTo(const std::string &path, bool createMissing) {
+std::expected<MemFSBackend::WalkResult, int> MemFSBackend::walkTo(const std::string &path) {
   auto parts = splitPath(path);
 
   Node *node = m_root.get();
@@ -52,26 +52,37 @@ std::expected<MemFSBackend::WalkResult, int> MemFSBackend::walkTo(const std::str
     parent = node;
     lastName = part;
 
-    if (!node->children.contains(part)) {
-      if (!createMissing)
-        return std::unexpected(ENOENT);
+    auto it = node->children.find(part);
+    if (it == node->children.end())
+      return std::unexpected(ENOENT);
 
-      auto newNode = std::make_unique<Node>();
-      newNode->stat.mode = 040755;
-      newNode->stat.ino = m_nextIno++;
-      newNode->stat.uid = 1000;
-      newNode->stat.gid = 1000;
-      auto now = nowMs();
-      newNode->stat.atimeMs = now;
-      newNode->stat.mtimeMs = now;
-      newNode->stat.ctimeMs = now;
-      node->children[part] = std::move(newNode);
-    }
-
-    node = node->children[part].get();
+    node = it->second.get();
   }
 
   return WalkResult{node, parent, lastName};
+}
+
+std::expected<MemFSBackend::Node *const, int> MemFSBackend::parentDir(const std::string &path) {
+  auto parts = splitPath(path);
+  if (parts.empty())
+    return m_root.get();
+
+  parts.pop_back();
+  if (parts.empty())
+    return m_root.get();
+
+  std::string parentPath = "/";
+  for (size_t i = 0; i < parts.size(); ++i) {
+    if (i > 0)
+      parentPath += "/";
+    parentPath += parts[i];
+  }
+  auto w = walkTo(parentPath);
+  if (!w)
+    return std::unexpected(w.error());
+  if (!w->node->stat.isDir())
+    return std::unexpected(ENOTDIR);
+  return w->node;
 }
 
 std::expected<std::string, int> MemFSBackend::readFile(const std::string &path) {
@@ -89,7 +100,7 @@ std::expected<std::vector<uint8_t>, int> MemFSBackend::readFileBytes(const std::
     return std::unexpected(w.error());
   if (w->node->stat.isDir())
     return std::unexpected(EISDIR);
-  return w->node->data;
+  return std::move(w->node->data);
 }
 
 std::expected<void, int> MemFSBackend::writeFile(const std::string &path, const void *data, size_t len) {
@@ -98,27 +109,12 @@ std::expected<void, int> MemFSBackend::writeFile(const std::string &path, const 
     return std::unexpected(EISDIR);
 
   std::string fileName = parts.back();
-  parts.pop_back();
-
-  Node *dir = m_root.get();
-  if (!parts.empty()) {
-    std::string parentPath = "/";
-    for (size_t i = 0; i < parts.size(); ++i) {
-      if (i > 0)
-        parentPath += "/";
-      parentPath += parts[i];
-    }
-    auto w = walkTo(parentPath);
-    if (!w)
-      return std::unexpected(w.error());
-    dir = w->node;
-  }
-
-  if (!dir->stat.isDir())
-    return std::unexpected(ENOTDIR);
+  auto p = parentDir(path);
+  if (!p)
+    return std::unexpected(p.error());
 
   auto now = nowMs();
-  auto &entry = dir->children[fileName];
+  auto &entry = (*p)->children[fileName];
   if (!entry) {
     entry = std::make_unique<Node>();
     entry->stat.dev = 0;
@@ -138,7 +134,6 @@ std::expected<void, int> MemFSBackend::writeFile(const std::string &path, const 
   entry->data.assign(buf, buf + len);
   entry->stat.size = static_cast<int64_t>(len);
   entry->stat.mtimeMs = now;
-  entry->stat.ctimeMs = now;
   return {};
 }
 
@@ -148,30 +143,14 @@ std::expected<void, int> MemFSBackend::appendFile(const std::string &path, const
     return std::unexpected(EISDIR);
 
   std::string fileName = parts.back();
-  parts.pop_back();
-
-  Node *dir = m_root.get();
-  if (!parts.empty()) {
-    std::string parentPath = "/";
-    for (size_t i = 0; i < parts.size(); ++i) {
-      if (i > 0)
-        parentPath += "/";
-      parentPath += parts[i];
-    }
-    auto w = walkTo(parentPath);
-    if (!w)
-      return std::unexpected(w.error());
-    dir = w->node;
-  }
-
-  if (!dir->stat.isDir())
-    return std::unexpected(ENOTDIR);
+  auto p = parentDir(path);
+  if (!p)
+    return std::unexpected(p.error());
 
   auto now = nowMs();
-  auto &entry = dir->children[fileName];
-  if (!entry) {
+  auto &entry = (*p)->children[fileName];
+  if (!entry)
     return writeFile(path, data, len);
-  }
   if (entry->stat.isDir())
     return std::unexpected(EISDIR);
 
@@ -179,7 +158,6 @@ std::expected<void, int> MemFSBackend::appendFile(const std::string &path, const
   entry->data.insert(entry->data.end(), buf, buf + len);
   entry->stat.size = static_cast<int64_t>(entry->data.size());
   entry->stat.mtimeMs = now;
-  entry->stat.ctimeMs = now;
   return {};
 }
 
@@ -189,23 +167,16 @@ std::expected<void, int> MemFSBackend::unlink(const std::string &path) {
     return std::unexpected(EACCES);
 
   std::string fileName = parts.back();
-  std::string parentPath = "/";
-  for (size_t i = 0; i + 1 < parts.size(); ++i) {
-    parentPath += (i > 0 ? "/" : "") + parts[i];
-  }
-  if (parts.size() == 1)
-    parentPath = "/";
+  auto p = parentDir(path);
+  if (!p)
+    return std::unexpected(p.error());
 
-  auto w = walkTo(parentPath);
-  if (!w)
-    return std::unexpected(w.error());
-
-  auto it = w->node->children.find(fileName);
-  if (it == w->node->children.end())
+  auto it = (*p)->children.find(fileName);
+  if (it == (*p)->children.end())
     return std::unexpected(ENOENT);
   if (it->second->stat.isDir() && !it->second->children.empty())
     return std::unexpected(ENOTEMPTY);
-  w->node->children.erase(it);
+  (*p)->children.erase(it);
   return {};
 }
 
@@ -272,7 +243,16 @@ std::expected<void, int> MemFSBackend::mkdir(const std::string &path, bool recur
   return {};
 }
 
-std::expected<void, int> MemFSBackend::rmdir(const std::string &path) { return unlink(path); }
+std::expected<void, int> MemFSBackend::rmdir(const std::string &path) {
+  auto w = walkTo(path);
+  if (!w)
+    return std::unexpected(w.error());
+  if (!w->node->stat.isDir())
+    return std::unexpected(ENOTDIR);
+  if (!w->node->children.empty())
+    return std::unexpected(ENOTEMPTY);
+  return unlink(path);
+}
 
 std::expected<std::vector<std::string>, int> MemFSBackend::readdir(const std::string &path) {
   auto w = walkTo(path);
@@ -303,45 +283,33 @@ std::expected<void, int> MemFSBackend::rename(const std::string &oldPath, const 
   if (oldParts.empty())
     return std::unexpected(EACCES);
   std::string oldName = oldParts.back();
-  oldParts.pop_back();
 
-  std::string oldParentPath = "/";
-  for (size_t i = 0; i < oldParts.size(); ++i) {
-    oldParentPath += (i > 0 ? "/" : "") + oldParts[i];
-  }
-  if (oldParts.empty())
-    oldParentPath = "/";
+  auto oldP = parentDir(oldPath);
+  if (!oldP)
+    return std::unexpected(oldP.error());
 
-  auto oldW = walkTo(oldParentPath);
-  if (!oldW)
-    return std::unexpected(oldW.error());
-  auto it = oldW->node->children.find(oldName);
-  if (it == oldW->node->children.end())
+  auto it = (*oldP)->children.find(oldName);
+  if (it == (*oldP)->children.end())
     return std::unexpected(ENOENT);
 
   auto newParts = splitPath(newPath);
   if (newParts.empty())
     return std::unexpected(EACCES);
   std::string newName = newParts.back();
-  newParts.pop_back();
 
-  std::string newParentPath = "/";
-  for (size_t i = 0; i < newParts.size(); ++i) {
-    newParentPath += (i > 0 ? "/" : "") + newParts[i];
+  auto newP = parentDir(newPath);
+  if (!newP)
+    return std::unexpected(newP.error());
+
+  auto &dstEntry = (*newP)->children[newName];
+  if (dstEntry) {
+    if (dstEntry->stat.isDir() && !dstEntry->children.empty())
+      return std::unexpected(ENOTEMPTY);
   }
-  if (newParts.empty())
-    newParentPath = "/";
-
-  auto newW = walkTo(newParentPath);
-  if (!newW)
-    return std::unexpected(newW.error());
-
-  if (newW->node->children.contains(newName))
-    return std::unexpected(EEXIST);
 
   auto node = std::move(it->second);
-  oldW->node->children.erase(it);
-  newW->node->children[newName] = std::move(node);
+  (*oldP)->children.erase(it);
+  (*newP)->children[newName] = std::move(node);
   return {};
 }
 
@@ -351,10 +319,27 @@ std::expected<void, int> MemFSBackend::copyFile(const std::string &src, const st
     return std::unexpected(w.error());
   if (w->node->stat.isDir())
     return std::unexpected(EISDIR);
-  return writeFile(dst, w->node->data.data(), w->node->data.size());
+
+  auto parts = splitPath(dst);
+  if (parts.empty())
+    return std::unexpected(EISDIR);
+  std::string fileName = parts.back();
+
+  auto p = parentDir(dst);
+  if (!p)
+    return std::unexpected(p.error());
+
+  auto clone = std::make_unique<Node>();
+  clone->stat = w->node->stat;
+  clone->data = w->node->data;
+  clone->stat.ino = m_nextIno++;
+  (*p)->children[fileName] = std::move(clone);
+  return {};
 }
 
 std::expected<void, int> MemFSBackend::truncate(const std::string &path, int64_t size) {
+  if (size < 0)
+    return std::unexpected(EINVAL);
   auto w = walkTo(path);
   if (!w)
     return std::unexpected(w.error());
@@ -366,8 +351,9 @@ std::expected<void, int> MemFSBackend::truncate(const std::string &path, int64_t
     w->node->data.resize(size);
   }
   w->node->stat.size = size;
-  w->node->stat.mtimeMs = nowMs();
-  w->node->stat.ctimeMs = nowMs();
+  auto now = nowMs();
+  w->node->stat.mtimeMs = now;
+  w->node->stat.ctimeMs = now;
   return {};
 }
 
@@ -377,6 +363,7 @@ std::expected<void, int> MemFSBackend::utimes(const std::string &path, int64_t a
     return std::unexpected(w.error());
   w->node->stat.atimeMs = atimeMs;
   w->node->stat.mtimeMs = mtimeMs;
+  w->node->stat.ctimeMs = nowMs();
   return {};
 }
 

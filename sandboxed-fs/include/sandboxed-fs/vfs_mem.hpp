@@ -13,7 +13,8 @@
 namespace sandboxed_fs {
 
 // Pure in-memory VFS backend — no disk I/O.
-// Intermediate directories are created implicitly by writeFile and mkdir.
+// The filesystem is stored as a tree of Node objects.
+// Intermediate directories are NOT created implicitly; call mkdir first.
 class MemFSBackend : public VFSBackend {
 public:
   MemFSBackend();
@@ -57,7 +58,8 @@ private:
     std::string name;
   };
 
-  std::expected<WalkResult, int> walkTo(const std::string &path, bool createMissing = false);
+  std::expected<WalkResult, int> walkTo(const std::string &path);
+  std::expected<Node *const, int> parentDir(const std::string &path);
 };
 
 } // namespace sandboxed_fs
