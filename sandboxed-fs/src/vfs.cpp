@@ -105,12 +105,14 @@ std::expected<VirtualFS::Resolved, int> VirtualFS::resolve(const std::string &pa
     if ((mount.perm & neededPerm) != neededPerm)
       return std::unexpected(EACCES);
 
-    if (normPath == mount.prefix)
-      return Resolved{mount.backend.get(), "/"};
-
-    std::string subPath = normPath.substr(mount.prefix.size());
-    if (subPath.empty())
-      subPath = "/";
+    std::string subPath;
+    if (normPath == mount.prefix) {
+      subPath = mount.backendPath;
+    } else {
+      subPath = normPath.substr(mount.prefix.size());
+      if (mount.backendPath.size() > 1)  // not just "/"
+        subPath = mount.backendPath + subPath;
+    }
     return Resolved{mount.backend.get(), subPath};
   }
 

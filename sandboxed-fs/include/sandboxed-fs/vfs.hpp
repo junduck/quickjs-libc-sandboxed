@@ -15,6 +15,11 @@ struct MountEntry {
   std::string prefix;
   Perm perm;
   std::shared_ptr<VFSBackend> backend;
+  // Path within the backend that this mount prefix maps to.
+  // Default "/" means the mount prefix maps to the backend root.
+  // Set to e.g. "/sub" when two mounts share a backend and one is
+  // a sub-directory of the other (e.g. /app → /, /app/sub → /sub).
+  std::string backendPath = "/";
 };
 
 // Composite VFS backend that routes operations to sub-backends by
