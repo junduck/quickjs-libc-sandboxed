@@ -8,11 +8,39 @@
 
 namespace sandboxed_fs {
 
+static void checkBackendConflict(const std::vector<MountEntry> &mounts) {
+  for (size_t i = 0; i < mounts.size(); ++i) {
+    for (size_t j = i + 1; j < mounts.size(); ++j) {
+      if (mounts[i].backend.get() == mounts[j].backend.get() &&
+          mounts[i].perm != mounts[j].perm) {
+        throw std::invalid_argument(
+            "VirtualFS: cannot share same backend with conflicting permissions "
+            "(mount '" + mounts[i].prefix + "' has perm " +
+            std::to_string(static_cast<int>(mounts[i].perm)) +
+            ", mount '" + mounts[j].prefix + "' has perm " +
+            std::to_string(static_cast<int>(mounts[j].perm)) + ")");
+      }
+    }
+  }
+}
+
 VirtualFS::VirtualFS(std::vector<MountEntry> mounts) : m_mounts(std::move(mounts)) {
-  std::sort(m_mounts.begin(), m_mounts.end(), [](const MountEntry &a, const MountEntry &b) { return a.prefix.size() > b.prefix.size(); });
+  checkBackendConflict(m_mounts);
+  std::sort(m_mounts.begin(), m_mounts.end(),
+            [](const MountEntry &a, const MountEntry &b) { return a.prefix.size() > b.prefix.size(); });
 }
 
 void VirtualFS::mount(const MountEntry &entry) {
+  for (const auto &m : m_mounts) {
+    if (m.backend.get() == entry.backend.get() && m.perm != entry.perm) {
+      throw std::invalid_argument(
+          "MountEntry: cannot share same backend with conflicting "
+          "permissions (mount '" +
+          m.prefix + "' has perm " + std::to_string(static_cast<int>(m.perm)) +
+          ", new mount '" + entry.prefix + "' has perm " +
+          std::to_string(static_cast<int>(entry.perm)) + ")");
+    }
+  }
   auto it = std::lower_bound(m_mounts.begin(), m_mounts.end(), entry,
                              [](const MountEntry &a, const MountEntry &b) { return a.prefix.size() > b.prefix.size(); });
   m_mounts.insert(it, entry);
@@ -60,6 +88,13 @@ std::expected<VirtualFS::Resolved, int> VirtualFS::resolve(const std::string &pa
   auto normPath = normalize(path);
 
   for (const auto &mount : m_mounts) {
+    // Root mount matches everything (catches at end since sorted last).
+    if (mount.prefix == "/") {
+      if ((mount.perm & neededPerm) != neededPerm)
+        return std::unexpected(EACCES);
+      return Resolved{mount.backend.get(), normPath};
+    }
+
     if (normPath.size() < mount.prefix.size())
       continue;
     if (normPath.compare(0, mount.prefix.size(), mount.prefix) != 0)
