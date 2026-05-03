@@ -26,10 +26,11 @@ void VirtualFS::mount(const MountEntry& entry) {
 std::string VirtualFS::normalize(const std::string& path) {
     if (path.empty()) return "/";
 
-    std::vector<std::string> parts;
     std::string p = path;
-    if (p[0] != '/') p = "/" + p;
+    if (p[0] != '/' && p[0] != '\\') p = "/" + p;
+    std::replace(p.begin(), p.end(), '\\', '/');
 
+    std::vector<std::string> parts;
     std::istringstream ss(p);
     std::string part;
     while (std::getline(ss, part, '/')) {

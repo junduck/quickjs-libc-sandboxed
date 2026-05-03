@@ -11,7 +11,8 @@ static std::vector<std::string> splitPath(const std::string& path) {
     std::vector<std::string> parts;
     if (path.empty() || path == "/") return parts;
     std::string p = path;
-    if (p[0] == '/') p = p.substr(1);
+    if (p[0] == '/' || p[0] == '\\') p = p.substr(1);
+    std::replace(p.begin(), p.end(), '\\', '/');
     std::istringstream ss(p);
     std::string part;
     while (std::getline(ss, part, '/')) {
