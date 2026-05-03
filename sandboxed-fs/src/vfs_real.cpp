@@ -87,8 +87,7 @@ static uint32_t fileTypeToMode(fs::file_type t) {
 }
 
 static bool pathStartsWith(const fs::path &path, const fs::path &prefix) {
-  auto [mm, _] =
-      std::mismatch(prefix.begin(), prefix.end(), path.begin(), path.end());
+  auto [mm, _] = std::mismatch(prefix.begin(), prefix.end(), path.begin(), path.end());
   return mm == prefix.end();
 }
 
@@ -107,8 +106,7 @@ RealFSBackend::RealFSBackend(fs::path realRoot) {
   std::error_code ec;
   m_root = fs::canonical(fs::absolute(realRoot), ec);
   if (ec) {
-    throw VFSError(ec.value(), "RealFSBackend: cannot canonicalize root '" +
-                                   realRoot.string() + "': " + ec.message());
+    throw VFSError(ec.value(), "RealFSBackend: cannot canonicalize root '" + realRoot.string() + "': " + ec.message());
   }
 }
 
@@ -130,11 +128,9 @@ std::string RealFSBackend::resolveExisting(const std::string &path) {
   std::error_code ec;
   auto canonical = fs::canonical(fullPath, ec);
   if (ec)
-    throw VFSError(ec.value(),
-                   "RealFSBackend: '" + path + "': " + ec.message());
+    throw VFSError(ec.value(), "RealFSBackend: '" + path + "': " + ec.message());
   if (!pathStartsWith(canonical, m_root))
-    throw VFSError(EACCES,
-                   "RealFSBackend: path escapes sandbox: '" + path + "'");
+    throw VFSError(EACCES, "RealFSBackend: path escapes sandbox: '" + path + "'");
   return canonical.string();
 }
 
@@ -143,11 +139,9 @@ std::string RealFSBackend::resolveCreating(const std::string &path) {
   std::error_code ec;
   auto resolved = fs::weakly_canonical(fullPath, ec);
   if (ec)
-    throw VFSError(ec.value(),
-                   "RealFSBackend: '" + path + "': " + ec.message());
+    throw VFSError(ec.value(), "RealFSBackend: '" + path + "': " + ec.message());
   if (!pathStartsWith(resolved, m_root))
-    throw VFSError(EACCES,
-                   "RealFSBackend: path escapes sandbox: '" + path + "'");
+    throw VFSError(EACCES, "RealFSBackend: path escapes sandbox: '" + path + "'");
   return resolved.string();
 }
 
@@ -183,8 +177,7 @@ std::vector<uint8_t> RealFSBackend::readFileBytes(const std::string &path) {
     throw VFSError(EACCES, "readFileBytes '" + path + "': cannot open");
 
   std::vector<uint8_t> data(sz);
-  in.read(reinterpret_cast<char *>(data.data()),
-          static_cast<std::streamsize>(sz));
+  in.read(reinterpret_cast<char *>(data.data()), static_cast<std::streamsize>(sz));
   return data;
 }
 
@@ -192,8 +185,7 @@ std::vector<uint8_t> RealFSBackend::readFileBytes(const std::string &path) {
 // writeFile / appendFile
 // ---------------------------------------------------------------------------
 
-void RealFSBackend::writeFile(const std::string &path, const void *data,
-                              size_t len) {
+void RealFSBackend::writeFile(const std::string &path, const void *data, size_t len) {
   auto resolved = resolveCreating(path);
   std::ofstream out(resolved, std::ios::binary | std::ios::trunc);
   if (!out)
@@ -203,8 +195,7 @@ void RealFSBackend::writeFile(const std::string &path, const void *data,
     throw VFSError(EIO, "writeFile '" + path + "': write failed");
 }
 
-void RealFSBackend::appendFile(const std::string &path, const void *data,
-                               size_t len) {
+void RealFSBackend::appendFile(const std::string &path, const void *data, size_t len) {
   auto resolved = resolveCreating(path);
   std::ofstream out(resolved, std::ios::binary | std::ios::app);
   if (!out)
@@ -226,8 +217,7 @@ void RealFSBackend::unlink(const std::string &path) {
     throw VFSError(ec.value(), "unlink '" + path + "': " + ec.message());
 }
 
-void RealFSBackend::mkdir(const std::string &path, bool recursive,
-                          uint32_t mode) {
+void RealFSBackend::mkdir(const std::string &path, bool recursive, uint32_t mode) {
   auto resolved = resolveCreating(path);
   std::error_code ec;
   if (recursive) {
@@ -265,8 +255,7 @@ std::vector<std::string> RealFSBackend::readdir(const std::string &path) {
 // stat / lstat
 // ---------------------------------------------------------------------------
 
-static Stat buildStat(const fs::path &resolved, fs::file_status st,
-                      bool /*followSymlinks*/) {
+static Stat buildStat(const fs::path &resolved, fs::file_status st, bool /*followSymlinks*/) {
   Stat s;
   s.mode = fileTypeToMode(st.type()) | permsToMode(st.permissions());
 
@@ -281,9 +270,7 @@ static Stat buildStat(const fs::path &resolved, fs::file_status st,
   auto ftime = fs::last_write_time(resolved, ec);
   if (!ec) {
     auto sysTime = fs::file_time_type::clock::to_sys(ftime);
-    s.mtimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    sysTime.time_since_epoch())
-                    .count();
+    s.mtimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(sysTime.time_since_epoch()).count();
   }
 
   return s;
@@ -321,15 +308,13 @@ bool RealFSBackend::exists(const std::string &path) {
 // rename / copyFile
 // ---------------------------------------------------------------------------
 
-void RealFSBackend::rename(const std::string &oldPath,
-                           const std::string &newPath) {
+void RealFSBackend::rename(const std::string &oldPath, const std::string &newPath) {
   auto resolvedOld = resolveExisting(oldPath);
   auto resolvedNew = resolveCreating(newPath);
   std::error_code ec;
   fs::rename(resolvedOld, resolvedNew, ec);
   if (ec)
-    throw VFSError(ec.value(), "rename '" + oldPath + "' -> '" + newPath +
-                                   "': " + ec.message());
+    throw VFSError(ec.value(), "rename '" + oldPath + "' -> '" + newPath + "': " + ec.message());
 }
 
 void RealFSBackend::copyFile(const std::string &src, const std::string &dst) {
@@ -338,8 +323,7 @@ void RealFSBackend::copyFile(const std::string &src, const std::string &dst) {
   std::error_code ec;
   fs::copy_file(resolvedSrc, resolvedDst, ec);
   if (ec)
-    throw VFSError(ec.value(),
-                   "copyFile '" + src + "' -> '" + dst + "': " + ec.message());
+    throw VFSError(ec.value(), "copyFile '" + src + "' -> '" + dst + "': " + ec.message());
 }
 
 // ---------------------------------------------------------------------------
@@ -354,12 +338,10 @@ void RealFSBackend::truncate(const std::string &path, int64_t size) {
     throw VFSError(ec.value(), "truncate '" + path + "': " + ec.message());
 }
 
-void RealFSBackend::utimes(const std::string &path, int64_t /*atimeMs*/,
-                           int64_t mtimeMs) {
+void RealFSBackend::utimes(const std::string &path, int64_t /*atimeMs*/, int64_t mtimeMs) {
   auto resolved = resolveExisting(path);
   std::error_code ec;
-  fs::last_write_time(
-      resolved, fs::file_time_type(std::chrono::milliseconds(mtimeMs)), ec);
+  fs::last_write_time(resolved, fs::file_time_type(std::chrono::milliseconds(mtimeMs)), ec);
   if (ec)
     throw VFSError(ec.value(), "utimes '" + path + "': " + ec.message());
 }
@@ -374,14 +356,11 @@ int RealFSBackend::access(const std::string &path, int mode) {
     return 0;
 
   auto perms = st.permissions();
-  if ((mode & access_mode::R_OK) &&
-      (perms & fs::perms::owner_read) == fs::perms::none)
+  if ((mode & access_mode::R_OK) && (perms & fs::perms::owner_read) == fs::perms::none)
     return EACCES;
-  if ((mode & access_mode::W_OK) &&
-      (perms & fs::perms::owner_write) == fs::perms::none)
+  if ((mode & access_mode::W_OK) && (perms & fs::perms::owner_write) == fs::perms::none)
     return EACCES;
-  if ((mode & access_mode::X_OK) &&
-      (perms & fs::perms::owner_exec) == fs::perms::none)
+  if ((mode & access_mode::X_OK) && (perms & fs::perms::owner_exec) == fs::perms::none)
     return EACCES;
   return 0;
 }
