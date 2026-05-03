@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string_view>
 
@@ -93,8 +94,11 @@ static bool pathStartsWith(const fs::path &path, const fs::path &prefix) {
 
 static std::string_view stripLeadingSlash(const std::string &path) {
   std::string_view sv = path;
-  while (!sv.empty() && sv.front() == '/')
-    sv = sv.substr(1);
+  auto pos = sv.find_first_not_of('/');
+  if (pos != std::string_view::npos)
+    sv.remove_prefix(pos);
+  else
+    sv = {};
   return sv;
 }
 
@@ -145,7 +149,7 @@ std::expected<std::string, int> RealFSBackend::resolveCreating(const std::string
 }
 
 // ---------------------------------------------------------------------------
-// readFile / readFileBytes
+// readFile / readFileBytes  (reads til EOF — no pre-size TOCTOU)
 // ---------------------------------------------------------------------------
 
 std::expected<std::string, int> RealFSBackend::readFile(const std::string &path) {
@@ -153,18 +157,11 @@ std::expected<std::string, int> RealFSBackend::readFile(const std::string &path)
   if (!r)
     return std::unexpected(r.error());
 
-  std::error_code ec;
-  auto sz = static_cast<size_t>(fs::file_size(*r, ec));
-  if (ec)
-    return std::unexpected(ec.value());
-
   std::ifstream in(*r, std::ios::binary);
   if (!in)
     return std::unexpected(EACCES);
 
-  std::string data(sz, '\0');
-  in.read(data.data(), static_cast<std::streamsize>(sz));
-  return data;
+  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
 std::expected<std::vector<uint8_t>, int> RealFSBackend::readFileBytes(const std::string &path) {
@@ -172,18 +169,11 @@ std::expected<std::vector<uint8_t>, int> RealFSBackend::readFileBytes(const std:
   if (!r)
     return std::unexpected(r.error());
 
-  std::error_code ec;
-  auto sz = static_cast<size_t>(fs::file_size(*r, ec));
-  if (ec)
-    return std::unexpected(ec.value());
-
   std::ifstream in(*r, std::ios::binary);
   if (!in)
     return std::unexpected(EACCES);
 
-  std::vector<uint8_t> data(sz);
-  in.read(reinterpret_cast<char *>(data.data()), static_cast<std::streamsize>(sz));
-  return data;
+  return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
 // ---------------------------------------------------------------------------
@@ -285,20 +275,22 @@ std::expected<std::vector<std::string>, int> RealFSBackend::readdir(const std::s
 // stat / lstat
 // ---------------------------------------------------------------------------
 
-static Stat buildStat(const fs::path &resolved, fs::file_status st) {
+static std::expected<Stat, int> buildStat(const fs::path &resolved, fs::file_status st) {
   Stat s;
   s.mode = fileTypeToMode(st.type()) | permsToMode(st.permissions());
 
-  std::error_code ec;
-  s.size = static_cast<int64_t>(fs::file_size(resolved, ec));
-  if (ec)
-    s.size = 0;
+  std::error_code szEc;
+  s.size = static_cast<int64_t>(fs::file_size(resolved, szEc));
+  if (szEc)
+    return std::unexpected(szEc.value());
 
-  auto nlink = fs::hard_link_count(resolved, ec);
-  s.nlink = ec ? 1 : nlink;
+  std::error_code nlinkEc;
+  auto nlink = fs::hard_link_count(resolved, nlinkEc);
+  s.nlink = nlinkEc ? 1 : nlink;
 
-  auto ftime = fs::last_write_time(resolved, ec);
-  if (!ec) {
+  std::error_code timeEc;
+  auto ftime = fs::last_write_time(resolved, timeEc);
+  if (!timeEc) {
     auto sysTime = fs::file_time_type::clock::to_sys(ftime);
     s.mtimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(sysTime.time_since_epoch()).count();
   }
@@ -331,14 +323,10 @@ std::expected<Stat, int> RealFSBackend::lstat(const std::string &path) {
 }
 
 // ---------------------------------------------------------------------------
-// exists
+// exists  (now uses resolveExisting — no sandbox bypass)
 // ---------------------------------------------------------------------------
 
-bool RealFSBackend::exists(const std::string &path) {
-  auto fullPath = makePath(path);
-  std::error_code ec;
-  return fs::exists(fullPath, ec);
-}
+bool RealFSBackend::exists(const std::string &path) { return resolveExisting(path).has_value(); }
 
 // ---------------------------------------------------------------------------
 // rename / copyFile
@@ -379,6 +367,8 @@ std::expected<void, int> RealFSBackend::copyFile(const std::string &src, const s
 // ---------------------------------------------------------------------------
 
 std::expected<void, int> RealFSBackend::truncate(const std::string &path, int64_t size) {
+  if (size < 0)
+    return std::unexpected(EINVAL);
   auto r = resolveExisting(path);
   if (!r)
     return std::unexpected(r.error());
@@ -391,12 +381,14 @@ std::expected<void, int> RealFSBackend::truncate(const std::string &path, int64_
 }
 
 std::expected<void, int> RealFSBackend::utimes(const std::string &path, int64_t /*atimeMs*/, int64_t mtimeMs) {
+  // std::filesystem only exposes last_write_time; atime cannot be set portably.
   auto r = resolveExisting(path);
   if (!r)
     return std::unexpected(r.error());
 
   std::error_code ec;
-  fs::last_write_time(*r, fs::file_time_type(std::chrono::milliseconds(mtimeMs)), ec);
+  using Dur = fs::file_time_type::duration;
+  fs::last_write_time(*r, fs::file_time_type(std::chrono::duration_cast<Dur>(std::chrono::milliseconds(mtimeMs))), ec);
   if (ec)
     return std::unexpected(ec.value());
   return {};
@@ -404,17 +396,23 @@ std::expected<void, int> RealFSBackend::utimes(const std::string &path, int64_t 
 
 int RealFSBackend::access(const std::string &path, int mode) {
   auto r = resolveExisting(path);
-  if (!r) return r.error();
+  if (!r)
+    return r.error();
 
   std::error_code ec;
   auto st = fs::status(*r, ec);
-  if (ec) return ENOENT;
-  if (mode == access_mode::F_OK) return 0;
+  if (ec)
+    return ENOENT;
+  if (mode == access_mode::F_OK)
+    return 0;
 
   auto perms = st.permissions();
-  if ((mode & access_mode::R_OK) && (perms & fs::perms::owner_read) == fs::perms::none) return EACCES;
-  if ((mode & access_mode::W_OK) && (perms & fs::perms::owner_write) == fs::perms::none) return EACCES;
-  if ((mode & access_mode::X_OK) && (perms & fs::perms::owner_exec) == fs::perms::none) return EACCES;
+  if ((mode & access_mode::R_OK) && (perms & fs::perms::owner_read) == fs::perms::none)
+    return EACCES;
+  if ((mode & access_mode::W_OK) && (perms & fs::perms::owner_write) == fs::perms::none)
+    return EACCES;
+  if ((mode & access_mode::X_OK) && (perms & fs::perms::owner_exec) == fs::perms::none)
+    return EACCES;
   return 0;
 }
 
