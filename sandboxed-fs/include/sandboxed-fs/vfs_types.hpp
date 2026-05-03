@@ -13,6 +13,8 @@ enum class Perm : uint8_t {
 
 constexpr Perm operator|(Perm a, Perm b) { return static_cast<Perm>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b)); }
 constexpr Perm operator&(Perm a, Perm b) { return static_cast<Perm>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b)); }
+constexpr Perm operator~(Perm a) { return static_cast<Perm>(~static_cast<uint8_t>(a)); }
+
 constexpr bool hasRead(Perm p) { return (static_cast<uint8_t>(p & Perm::Read)) != 0; }
 constexpr bool hasWrite(Perm p) { return (static_cast<uint8_t>(p & Perm::Write)) != 0; }
 
@@ -35,8 +37,12 @@ struct Stat {
   int64_t ctimeMs = 0;
 
   bool isDir() const { return (mode & 0xF000) == 0x4000; }
-  bool isFile() const { return (mode & 0xF000) == 0x8000; }
+  bool isFile() const { return (mode & 0xF000) == 0x8000; } // regular file
   bool isSymlink() const { return (mode & 0xF000) == 0xA000; }
+  bool isFifo() const { return (mode & 0xF000) == 0x1000; }
+  bool isChr() const { return (mode & 0xF000) == 0x2000; }
+  bool isBlk() const { return (mode & 0xF000) == 0x6000; }
+  bool isSock() const { return (mode & 0xF000) == 0xC000; }
 };
 
 // Standard access(2) mode constants.

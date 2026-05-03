@@ -13,8 +13,9 @@ VirtualFS::VirtualFS(std::vector<MountEntry> mounts) : m_mounts(std::move(mounts
 }
 
 void VirtualFS::mount(const MountEntry &entry) {
-  m_mounts.push_back(entry);
-  std::sort(m_mounts.begin(), m_mounts.end(), [](const MountEntry &a, const MountEntry &b) { return a.prefix.size() > b.prefix.size(); });
+  auto it = std::lower_bound(m_mounts.begin(), m_mounts.end(), entry,
+                             [](const MountEntry &a, const MountEntry &b) { return a.prefix.size() > b.prefix.size(); });
+  m_mounts.insert(it, entry);
 }
 
 std::string VirtualFS::normalize(const std::string &path) {
@@ -43,9 +44,15 @@ std::string VirtualFS::normalize(const std::string &path) {
   if (parts.empty())
     return "/";
 
-  std::string result;
+  size_t total = 0;
   for (const auto &seg : parts)
-    result += "/" + seg;
+    total += seg.size() + 1;
+  std::string result;
+  result.reserve(total);
+  for (const auto &seg : parts) {
+    result += "/";
+    result += seg;
+  }
   return result;
 }
 
@@ -53,21 +60,35 @@ std::expected<VirtualFS::Resolved, int> VirtualFS::resolve(const std::string &pa
   auto normPath = normalize(path);
 
   for (const auto &mount : m_mounts) {
-    if (normPath == mount.prefix || normPath.starts_with(mount.prefix + "/")) {
-      if (static_cast<uint8_t>(mount.perm & neededPerm) == 0)
-        return std::unexpected(EACCES);
+    if (normPath.size() < mount.prefix.size())
+      continue;
+    if (normPath.compare(0, mount.prefix.size(), mount.prefix) != 0)
+      continue;
+    if (normPath.size() != mount.prefix.size() && normPath[mount.prefix.size()] != '/')
+      continue;
 
-      if (normPath == mount.prefix)
-        return Resolved{mount.backend.get(), "/"};
+    if ((mount.perm & neededPerm) != neededPerm)
+      return std::unexpected(EACCES);
 
-      std::string subPath = normPath.substr(mount.prefix.size());
-      if (subPath.empty())
-        subPath = "/";
-      return Resolved{mount.backend.get(), subPath};
-    }
+    if (normPath == mount.prefix)
+      return Resolved{mount.backend.get(), "/"};
+
+    std::string subPath = normPath.substr(mount.prefix.size());
+    if (subPath.empty())
+      subPath = "/";
+    return Resolved{mount.backend.get(), subPath};
   }
 
   return std::unexpected(EACCES);
+}
+
+static Perm neededPermForAccess(int mode) {
+  Perm p = Perm::None;
+  if (mode & access_mode::R_OK)
+    p = p | Perm::Read;
+  if (mode & access_mode::W_OK)
+    p = p | Perm::Write;
+  return p;
 }
 
 #define VFS_DISPATCH_READ(method, path)                                                                                                              \
@@ -118,6 +139,8 @@ std::expected<void, int> VirtualFS::utimes(const std::string &path, int64_t atim
   VFS_DISPATCH_WRITE(utimes, path, atimeMs, mtimeMs);
 }
 
+// -- non-macro: custom logic --------------------------------------------------
+
 bool VirtualFS::exists(const std::string &path) {
   auto r = resolve(path, Perm::Read);
   if (!r)
@@ -156,7 +179,8 @@ std::expected<void, int> VirtualFS::copyFile(const std::string &src, const std::
 }
 
 int VirtualFS::access(const std::string &path, int mode) {
-  auto r = resolve(path, Perm::Read);
+  Perm needed = neededPermForAccess(mode);
+  auto r = resolve(path, needed);
   if (!r)
     return r.error();
   return r->backend->access(r->subPath, mode);
