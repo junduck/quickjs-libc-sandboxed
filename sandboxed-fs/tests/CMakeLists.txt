@@ -14,6 +14,10 @@ add_executable(demo_escape demo_escape.cpp)
 
 target_link_libraries(demo_escape PRIVATE sandboxed-fs)
 
+add_executable(demo_bug demo_bug.cpp)
+
+target_link_libraries(demo_bug PRIVATE sandboxed-fs)
+
 add_executable(bench_vfs bench_vfs.cpp)
 
 target_link_libraries(bench_vfs PRIVATE sandboxed-fs benchmark::benchmark)
