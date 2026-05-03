@@ -100,7 +100,7 @@ std::expected<std::vector<uint8_t>, int> MemFSBackend::readFileBytes(const std::
     return std::unexpected(w.error());
   if (w->node->stat.isDir())
     return std::unexpected(EISDIR);
-  return std::move(w->node->data);
+  return w->node->data;  // copy — read must not destroy stored content
 }
 
 std::expected<void, int> MemFSBackend::writeFile(const std::string &path, const void *data, size_t len) {
@@ -210,21 +210,11 @@ std::expected<void, int> MemFSBackend::mkdir(const std::string &path, bool recur
   } else {
     auto partsCopy = parts;
     std::string fileName = partsCopy.back();
-    partsCopy.pop_back();
 
-    Node *parent = m_root.get();
-    if (!partsCopy.empty()) {
-      std::string pp = "/";
-      for (size_t i = 0; i < partsCopy.size(); ++i) {
-        pp += (i > 0 ? "/" : "") + partsCopy[i];
-      }
-      auto w = walkTo(pp);
-      if (!w)
-        return std::unexpected(w.error());
-      parent = w->node;
-    }
-
-    if (parent->children.contains(fileName))
+    auto p = parentDir(path);
+    if (!p)
+      return std::unexpected(p.error());
+    if ((*p)->children.contains(fileName))
       return std::unexpected(EEXIST);
 
     auto now = nowMs();
@@ -238,7 +228,7 @@ std::expected<void, int> MemFSBackend::mkdir(const std::string &path, bool recur
     node->stat.atimeMs = now;
     node->stat.mtimeMs = now;
     node->stat.ctimeMs = now;
-    parent->children[fileName] = std::move(node);
+    (*p)->children[fileName] = std::move(node);
   }
   return {};
 }
@@ -279,6 +269,8 @@ std::expected<Stat, int> MemFSBackend::lstat(const std::string &path) { return s
 bool MemFSBackend::exists(const std::string &path) { return walkTo(path).has_value(); }
 
 std::expected<void, int> MemFSBackend::rename(const std::string &oldPath, const std::string &newPath) {
+  if (oldPath == newPath) return {};
+
   auto oldParts = splitPath(oldPath);
   if (oldParts.empty())
     return std::unexpected(EACCES);
@@ -291,6 +283,12 @@ std::expected<void, int> MemFSBackend::rename(const std::string &oldPath, const 
   auto it = (*oldP)->children.find(oldName);
   if (it == (*oldP)->children.end())
     return std::unexpected(ENOENT);
+
+  // Reject rename of directory into its own descendant (creates cycle)
+  if (it->second->stat.isDir() && newPath.size() > oldPath.size() &&
+      newPath[oldPath.size()] == '/' &&
+      newPath.compare(0, oldPath.size(), oldPath) == 0)
+    return std::unexpected(EINVAL);
 
   auto newParts = splitPath(newPath);
   if (newParts.empty())
@@ -329,6 +327,11 @@ std::expected<void, int> MemFSBackend::copyFile(const std::string &src, const st
   if (!p)
     return std::unexpected(p.error());
 
+  auto it = (*p)->children.find(fileName);
+  if (it != (*p)->children.end()) {
+    if (it->second->stat.isDir())
+      return std::unexpected(EISDIR);
+  }
   auto clone = std::make_unique<Node>();
   clone->stat = w->node->stat;
   clone->data = w->node->data;
