@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <expected>
 #include <sstream>
 #include <string>
 
@@ -43,129 +44,122 @@ std::string VirtualFS::normalize(const std::string &path) {
     return "/";
 
   std::string result;
-  for (const auto &seg : parts) {
+  for (const auto &seg : parts)
     result += "/" + seg;
-  }
   return result;
 }
 
-VirtualFS::Resolved VirtualFS::resolve(const std::string &path, Perm neededPerm) {
+std::expected<VirtualFS::Resolved, int> VirtualFS::resolve(const std::string &path, Perm neededPerm) {
   auto normPath = normalize(path);
 
   for (const auto &mount : m_mounts) {
     if (normPath == mount.prefix || normPath.starts_with(mount.prefix + "/")) {
-      if (static_cast<uint8_t>(mount.perm & neededPerm) == 0) {
-        throw VFSError(EACCES, "VirtualFS: permission denied for '" + path + "' (needed " + (neededPerm == Perm::Read ? "read" : "write") +
-                                   ", mount has " +
-                                   (mount.perm == ReadWrite    ? "readwrite"
-                                    : mount.perm == Perm::Read ? "read"
-                                                               : "none") +
-                                   ")");
-      }
+      if (static_cast<uint8_t>(mount.perm & neededPerm) == 0)
+        return std::unexpected(EACCES);
 
-      if (normPath == mount.prefix) {
-        return {mount.backend.get(), "/"};
-      }
+      if (normPath == mount.prefix)
+        return Resolved{mount.backend.get(), "/"};
+
       std::string subPath = normPath.substr(mount.prefix.size());
       if (subPath.empty())
         subPath = "/";
-      return {mount.backend.get(), subPath};
+      return Resolved{mount.backend.get(), subPath};
     }
   }
 
-  throw VFSError(EACCES, "VirtualFS: no mount for path '" + path + "'");
+  return std::unexpected(EACCES);
 }
 
-std::string VirtualFS::readFile(const std::string &path) {
-  auto [backend, sub] = resolve(path, Perm::Read);
-  return backend->readFile(sub);
+#define VFS_DISPATCH_READ(method, path)                                                                                                              \
+  do {                                                                                                                                               \
+    auto _r = resolve(path, Perm::Read);                                                                                                             \
+    if (!_r)                                                                                                                                         \
+      return std::unexpected(_r.error());                                                                                                            \
+    return _r->backend->method(_r->subPath);                                                                                                         \
+  } while (0)
+
+#define VFS_DISPATCH_WRITE(method, path, ...)                                                                                                        \
+  do {                                                                                                                                               \
+    auto _r = resolve(path, Perm::Write);                                                                                                            \
+    if (!_r)                                                                                                                                         \
+      return std::unexpected(_r.error());                                                                                                            \
+    return _r->backend->method(_r->subPath __VA_OPT__(, ) __VA_ARGS__);                                                                              \
+  } while (0)
+
+std::expected<std::string, int> VirtualFS::readFile(const std::string &path) { VFS_DISPATCH_READ(readFile, path); }
+
+std::expected<std::vector<uint8_t>, int> VirtualFS::readFileBytes(const std::string &path) { VFS_DISPATCH_READ(readFileBytes, path); }
+
+std::expected<void, int> VirtualFS::writeFile(const std::string &path, const void *data, size_t len) {
+  VFS_DISPATCH_WRITE(writeFile, path, data, len);
 }
 
-std::vector<uint8_t> VirtualFS::readFileBytes(const std::string &path) {
-  auto [backend, sub] = resolve(path, Perm::Read);
-  return backend->readFileBytes(sub);
+std::expected<void, int> VirtualFS::appendFile(const std::string &path, const void *data, size_t len) {
+  VFS_DISPATCH_WRITE(appendFile, path, data, len);
 }
 
-void VirtualFS::writeFile(const std::string &path, const void *data, size_t len) {
-  auto [backend, sub] = resolve(path, Perm::Write);
-  backend->writeFile(sub, data, len);
+std::expected<void, int> VirtualFS::unlink(const std::string &path) { VFS_DISPATCH_WRITE(unlink, path); }
+
+std::expected<void, int> VirtualFS::mkdir(const std::string &path, bool recursive, uint32_t mode) {
+  VFS_DISPATCH_WRITE(mkdir, path, recursive, mode);
 }
 
-void VirtualFS::appendFile(const std::string &path, const void *data, size_t len) {
-  auto [backend, sub] = resolve(path, Perm::Write);
-  backend->appendFile(sub, data, len);
-}
+std::expected<void, int> VirtualFS::rmdir(const std::string &path) { VFS_DISPATCH_WRITE(rmdir, path); }
 
-void VirtualFS::unlink(const std::string &path) {
-  auto [backend, sub] = resolve(path, Perm::Write);
-  backend->unlink(sub);
-}
+std::expected<std::vector<std::string>, int> VirtualFS::readdir(const std::string &path) { VFS_DISPATCH_READ(readdir, path); }
 
-void VirtualFS::mkdir(const std::string &path, bool recursive, uint32_t mode) {
-  auto [backend, sub] = resolve(path, Perm::Write);
-  backend->mkdir(sub, recursive, mode);
-}
+std::expected<Stat, int> VirtualFS::stat(const std::string &path) { VFS_DISPATCH_READ(stat, path); }
 
-void VirtualFS::rmdir(const std::string &path) {
-  auto [backend, sub] = resolve(path, Perm::Write);
-  backend->rmdir(sub);
-}
+std::expected<Stat, int> VirtualFS::lstat(const std::string &path) { VFS_DISPATCH_READ(lstat, path); }
 
-std::vector<std::string> VirtualFS::readdir(const std::string &path) {
-  auto [backend, sub] = resolve(path, Perm::Read);
-  return backend->readdir(sub);
-}
+std::expected<void, int> VirtualFS::truncate(const std::string &path, int64_t size) { VFS_DISPATCH_WRITE(truncate, path, size); }
 
-Stat VirtualFS::stat(const std::string &path) {
-  auto [backend, sub] = resolve(path, Perm::Read);
-  return backend->stat(sub);
-}
-
-Stat VirtualFS::lstat(const std::string &path) {
-  auto [backend, sub] = resolve(path, Perm::Read);
-  return backend->lstat(sub);
+std::expected<void, int> VirtualFS::utimes(const std::string &path, int64_t atimeMs, int64_t mtimeMs) {
+  VFS_DISPATCH_WRITE(utimes, path, atimeMs, mtimeMs);
 }
 
 bool VirtualFS::exists(const std::string &path) {
-  auto [backend, sub] = resolve(path, Perm::Read);
-  return backend->exists(sub);
+  auto r = resolve(path, Perm::Read);
+  if (!r)
+    return false;
+  return r->backend->exists(r->subPath);
 }
 
-void VirtualFS::rename(const std::string &oldPath, const std::string &newPath) {
-  auto [oldBackend, oldSub] = resolve(oldPath, Perm::Write);
-  auto [newBackend, newSub] = resolve(newPath, Perm::Write);
+std::expected<void, int> VirtualFS::rename(const std::string &oldPath, const std::string &newPath) {
+  auto oldR = resolve(oldPath, Perm::Write);
+  if (!oldR)
+    return std::unexpected(oldR.error());
+  auto newR = resolve(newPath, Perm::Write);
+  if (!newR)
+    return std::unexpected(newR.error());
 
-  if (oldBackend != newBackend) {
-    throw VFSError(EXDEV, "VirtualFS: cross-device rename not supported: '" + oldPath + "' -> '" + newPath + "'");
-  }
-  oldBackend->rename(oldSub, newSub);
+  if (oldR->backend != newR->backend)
+    return std::unexpected(EXDEV);
+  return oldR->backend->rename(oldR->subPath, newR->subPath);
 }
 
-void VirtualFS::copyFile(const std::string &src, const std::string &dst) {
-  auto [srcBackend, srcSub] = resolve(src, Perm::Read);
-  auto [dstBackend, dstSub] = resolve(dst, Perm::Write);
+std::expected<void, int> VirtualFS::copyFile(const std::string &src, const std::string &dst) {
+  auto srcR = resolve(src, Perm::Read);
+  if (!srcR)
+    return std::unexpected(srcR.error());
+  auto dstR = resolve(dst, Perm::Write);
+  if (!dstR)
+    return std::unexpected(dstR.error());
 
-  if (srcBackend == dstBackend) {
-    srcBackend->copyFile(srcSub, dstSub);
-  } else {
-    auto data = srcBackend->readFileBytes(srcSub);
-    dstBackend->writeFile(dstSub, data.data(), data.size());
-  }
-}
+  if (srcR->backend == dstR->backend)
+    return srcR->backend->copyFile(srcR->subPath, dstR->subPath);
 
-void VirtualFS::truncate(const std::string &path, int64_t size) {
-  auto [backend, sub] = resolve(path, Perm::Write);
-  backend->truncate(sub, size);
-}
-
-void VirtualFS::utimes(const std::string &path, int64_t atimeMs, int64_t mtimeMs) {
-  auto [backend, sub] = resolve(path, Perm::Write);
-  backend->utimes(sub, atimeMs, mtimeMs);
+  auto data = srcR->backend->readFileBytes(srcR->subPath);
+  if (!data)
+    return std::unexpected(data.error());
+  return dstR->backend->writeFile(dstR->subPath, data->data(), data->size());
 }
 
 int VirtualFS::access(const std::string &path, int mode) {
-  auto [backend, sub] = resolve(path, Perm::Read);
-  return backend->access(sub, mode);
+  auto r = resolve(path, Perm::Read);
+  if (!r)
+    return r.error();
+  return r->backend->access(r->subPath, mode);
 }
 
 } // namespace sandboxed_fs

@@ -20,55 +20,53 @@ TEST_F(MemFSTest, EmptyFS) {
 }
 
 TEST_F(MemFSTest, WriteAndReadFile) {
-  fs.writeFile("/hello.txt", "Hello, World!", 13);
+  ASSERT_TRUE(fs.writeFile("/hello.txt", "Hello, World!", 13).has_value());
   EXPECT_TRUE(fs.exists("/hello.txt"));
-  EXPECT_EQ(fs.readFile("/hello.txt"), "Hello, World!");
+  auto content = fs.readFile("/hello.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "Hello, World!");
 
   auto bytes = fs.readFileBytes("/hello.txt");
-  EXPECT_EQ(bytes.size(), 13);
-  EXPECT_EQ(bytes[0], 'H');
+  ASSERT_TRUE(bytes.has_value());
+  EXPECT_EQ(bytes->size(), 13);
+  EXPECT_EQ((*bytes)[0], 'H');
 }
 
 TEST_F(MemFSTest, AppendFile) {
-  fs.writeFile("/hello.txt", "Hello", 5);
-  fs.appendFile("/hello.txt", " World", 6);
-  EXPECT_EQ(fs.readFile("/hello.txt"), "Hello World");
+  ASSERT_TRUE(fs.writeFile("/hello.txt", "Hello", 5).has_value());
+  ASSERT_TRUE(fs.appendFile("/hello.txt", " World", 6).has_value());
+  auto content = fs.readFile("/hello.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "Hello World");
 }
 
 TEST_F(MemFSTest, StatFile) {
-  fs.writeFile("/data.bin", "0123456789", 10);
+  ASSERT_TRUE(fs.writeFile("/data.bin", "0123456789", 10).has_value());
   auto st = fs.stat("/data.bin");
-  EXPECT_TRUE(st.isFile());
-  EXPECT_FALSE(st.isDir());
-  EXPECT_EQ(st.size, 10);
+  ASSERT_TRUE(st.has_value());
+  EXPECT_TRUE(st->isFile());
+  EXPECT_FALSE(st->isDir());
+  EXPECT_EQ(st->size, 10);
 }
 
 TEST_F(MemFSTest, UnlinkFile) {
-  fs.writeFile("/temp.txt", "x", 1);
+  ASSERT_TRUE(fs.writeFile("/temp.txt", "x", 1).has_value());
   EXPECT_TRUE(fs.exists("/temp.txt"));
-  fs.unlink("/temp.txt");
+  ASSERT_TRUE(fs.unlink("/temp.txt").has_value());
   EXPECT_FALSE(fs.exists("/temp.txt"));
 }
 
-TEST_F(MemFSTest, ReadNonexistentThrows) {
-  EXPECT_THROW(fs.readFile("/nonexistent.txt"), sfs::VFSError);
-  try {
-    fs.readFile("/nonexistent.txt");
-    FAIL() << "Expected VFSError";
-  } catch (const sfs::VFSError &e) {
-    EXPECT_EQ(e.code(), ENOENT);
-  }
+TEST_F(MemFSTest, ReadNonexistent) {
+  auto r = fs.readFile("/nonexistent.txt");
+  EXPECT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), ENOENT);
 }
 
-TEST_F(MemFSTest, ReadDirOnFileThrows) {
-  fs.writeFile("/file.txt", "data", 4);
-  EXPECT_THROW(fs.readdir("/file.txt"), sfs::VFSError);
-  try {
-    fs.readdir("/file.txt");
-    FAIL() << "Expected VFSError";
-  } catch (const sfs::VFSError &e) {
-    EXPECT_EQ(e.code(), ENOTDIR);
-  }
+TEST_F(MemFSTest, ReadDirOnFile) {
+  ASSERT_TRUE(fs.writeFile("/file.txt", "data", 4).has_value());
+  auto r = fs.readdir("/file.txt");
+  EXPECT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), ENOTDIR);
 }
 
 class MemFSDirTest : public ::testing::Test {
@@ -77,52 +75,51 @@ protected:
 };
 
 TEST_F(MemFSDirTest, Mkdir) {
-  fs.mkdir("/a", false);
+  ASSERT_TRUE(fs.mkdir("/a", false).has_value());
   EXPECT_TRUE(fs.exists("/a"));
   auto st = fs.stat("/a");
-  EXPECT_TRUE(st.isDir());
+  ASSERT_TRUE(st.has_value());
+  EXPECT_TRUE(st->isDir());
 }
 
 TEST_F(MemFSDirTest, RecursiveMkdir) {
-  fs.mkdir("/a/b/c", true);
+  ASSERT_TRUE(fs.mkdir("/a/b/c", true).has_value());
   EXPECT_TRUE(fs.exists("/a"));
   EXPECT_TRUE(fs.exists("/a/b"));
   EXPECT_TRUE(fs.exists("/a/b/c"));
 
   auto entries = fs.readdir("/a");
-  EXPECT_EQ(entries.size(), 1);
-  EXPECT_EQ(entries[0], "b");
+  ASSERT_TRUE(entries.has_value());
+  EXPECT_EQ(entries->size(), 1);
+  EXPECT_EQ((*entries)[0], "b");
 }
 
 TEST_F(MemFSDirTest, Readdir) {
-  fs.mkdir("/dir", false);
-  fs.writeFile("/dir/a.txt", "a", 1);
-  fs.writeFile("/dir/b.txt", "b", 1);
-  fs.mkdir("/dir/sub", false);
+  ASSERT_TRUE(fs.mkdir("/dir", false).has_value());
+  ASSERT_TRUE(fs.writeFile("/dir/a.txt", "a", 1).has_value());
+  ASSERT_TRUE(fs.writeFile("/dir/b.txt", "b", 1).has_value());
+  ASSERT_TRUE(fs.mkdir("/dir/sub", false).has_value());
 
   auto entries = fs.readdir("/dir");
-  EXPECT_EQ(entries.size(), 3);
+  ASSERT_TRUE(entries.has_value());
+  EXPECT_EQ(entries->size(), 3);
 }
 
 TEST_F(MemFSDirTest, RmdirNonEmptyFails) {
-  fs.mkdir("/dir", false);
-  fs.writeFile("/dir/file.txt", "x", 1);
-  EXPECT_THROW(fs.rmdir("/dir"), sfs::VFSError);
-  try {
-    fs.rmdir("/dir");
-    FAIL() << "Expected VFSError";
-  } catch (const sfs::VFSError &e) {
-    EXPECT_EQ(e.code(), ENOTEMPTY);
-  }
+  ASSERT_TRUE(fs.mkdir("/dir", false).has_value());
+  ASSERT_TRUE(fs.writeFile("/dir/file.txt", "x", 1).has_value());
+  auto r = fs.rmdir("/dir");
+  EXPECT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), ENOTEMPTY);
 }
 
 TEST_F(MemFSDirTest, RemoveHierarchy) {
-  fs.mkdir("/a/b/c", true);
-  fs.writeFile("/a/b/c/file.txt", "data", 4);
-  fs.unlink("/a/b/c/file.txt");
-  fs.rmdir("/a/b/c");
-  fs.rmdir("/a/b");
-  fs.rmdir("/a");
+  ASSERT_TRUE(fs.mkdir("/a/b/c", true).has_value());
+  ASSERT_TRUE(fs.writeFile("/a/b/c/file.txt", "data", 4).has_value());
+  ASSERT_TRUE(fs.unlink("/a/b/c/file.txt").has_value());
+  ASSERT_TRUE(fs.rmdir("/a/b/c").has_value());
+  ASSERT_TRUE(fs.rmdir("/a/b").has_value());
+  ASSERT_TRUE(fs.rmdir("/a").has_value());
   EXPECT_FALSE(fs.exists("/a"));
 }
 
@@ -132,56 +129,73 @@ protected:
 };
 
 TEST_F(MemFSRenameCopyTest, RenameFile) {
-  fs.writeFile("/src.txt", "source", 6);
-  fs.rename("/src.txt", "/dst.txt");
+  ASSERT_TRUE(fs.writeFile("/src.txt", "source", 6).has_value());
+  ASSERT_TRUE(fs.rename("/src.txt", "/dst.txt").has_value());
   EXPECT_FALSE(fs.exists("/src.txt"));
   EXPECT_TRUE(fs.exists("/dst.txt"));
-  EXPECT_EQ(fs.readFile("/dst.txt"), "source");
+  auto content = fs.readFile("/dst.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "source");
 }
 
 TEST_F(MemFSRenameCopyTest, CopyFile) {
-  fs.writeFile("/src.txt", "source", 6);
-  fs.copyFile("/src.txt", "/copy.txt");
+  ASSERT_TRUE(fs.writeFile("/src.txt", "source", 6).has_value());
+  ASSERT_TRUE(fs.copyFile("/src.txt", "/copy.txt").has_value());
   EXPECT_TRUE(fs.exists("/src.txt"));
   EXPECT_TRUE(fs.exists("/copy.txt"));
-  EXPECT_EQ(fs.readFile("/copy.txt"), "source");
+  auto content = fs.readFile("/copy.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "source");
 }
 
-TEST_F(MemFSRenameCopyTest, RenameNonexistentThrows) { EXPECT_THROW(fs.rename("/nonexistent", "/foo"), sfs::VFSError); }
+TEST_F(MemFSRenameCopyTest, RenameNonexistent) {
+  auto r = fs.rename("/nonexistent", "/foo");
+  EXPECT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), ENOENT);
+}
 
 TEST_F(MemFSRenameCopyTest, RenameCrossDir) {
-  fs.mkdir("/a", false);
-  fs.mkdir("/b", false);
-  fs.writeFile("/a/file.txt", "data", 4);
-  fs.rename("/a/file.txt", "/b/renamed.txt");
+  ASSERT_TRUE(fs.mkdir("/a", false).has_value());
+  ASSERT_TRUE(fs.mkdir("/b", false).has_value());
+  ASSERT_TRUE(fs.writeFile("/a/file.txt", "data", 4).has_value());
+  ASSERT_TRUE(fs.rename("/a/file.txt", "/b/renamed.txt").has_value());
   EXPECT_FALSE(fs.exists("/a/file.txt"));
   EXPECT_TRUE(fs.exists("/b/renamed.txt"));
-  EXPECT_EQ(fs.readFile("/b/renamed.txt"), "data");
+  auto content = fs.readFile("/b/renamed.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "data");
 }
 
 TEST_F(MemFSRenameCopyTest, Truncate) {
-  fs.writeFile("/data.txt", "hello world", 11);
-  fs.truncate("/data.txt", 5);
-  EXPECT_EQ(fs.readFile("/data.txt"), "hello");
-  EXPECT_EQ(fs.stat("/data.txt").size, 5);
+  ASSERT_TRUE(fs.writeFile("/data.txt", "hello world", 11).has_value());
+  ASSERT_TRUE(fs.truncate("/data.txt", 5).has_value());
+  auto content = fs.readFile("/data.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "hello");
+  auto st = fs.stat("/data.txt");
+  ASSERT_TRUE(st.has_value());
+  EXPECT_EQ(st->size, 5);
 
-  fs.truncate("/data.txt", 10);
-  EXPECT_EQ(fs.stat("/data.txt").size, 10);
+  ASSERT_TRUE(fs.truncate("/data.txt", 10).has_value());
+  auto st2 = fs.stat("/data.txt");
+  ASSERT_TRUE(st2.has_value());
+  EXPECT_EQ(st2->size, 10);
 }
 
 TEST_F(MemFSRenameCopyTest, Utimes) {
-  fs.writeFile("/data.txt", "x", 1);
-  fs.utimes("/data.txt", 1000, 2000);
+  ASSERT_TRUE(fs.writeFile("/data.txt", "x", 1).has_value());
+  ASSERT_TRUE(fs.utimes("/data.txt", 1000, 2000).has_value());
   auto st = fs.stat("/data.txt");
-  EXPECT_EQ(st.atimeMs, 1000);
-  EXPECT_EQ(st.mtimeMs, 2000);
+  ASSERT_TRUE(st.has_value());
+  EXPECT_EQ(st->atimeMs, 1000);
+  EXPECT_EQ(st->mtimeMs, 2000);
 }
 
 class VirtualFSTest : public ::testing::Test {
 protected:
   void SetUp() override {
     bundleFs = std::make_shared<sfs::MemFSBackend>();
-    bundleFs->writeFile("/app.js", "console.log(1)", 14);
+    ASSERT_TRUE(bundleFs->writeFile("/app.js", "console.log(1)", 14).has_value());
     sandboxFs = std::make_shared<sfs::MemFSBackend>();
     vfs = std::make_unique<sfs::VirtualFS>(std::vector<sfs::MountEntry>{
         {"/bundle", sfs::Perm::Read, bundleFs},
@@ -196,51 +210,43 @@ protected:
 
 TEST_F(VirtualFSTest, ReadFromBundle) {
   EXPECT_TRUE(vfs->exists("/bundle/app.js"));
-  EXPECT_EQ(vfs->readFile("/bundle/app.js"), "console.log(1)");
+  auto content = vfs->readFile("/bundle/app.js");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "console.log(1)");
 }
 
 TEST_F(VirtualFSTest, WriteToSandbox) {
-  vfs->writeFile("/home/sandbox/data.txt", "sandbox-data", 12);
-  EXPECT_EQ(vfs->readFile("/home/sandbox/data.txt"), "sandbox-data");
+  ASSERT_TRUE(vfs->writeFile("/home/sandbox/data.txt", "sandbox-data", 12).has_value());
+  auto content = vfs->readFile("/home/sandbox/data.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "sandbox-data");
 }
 
-TEST_F(VirtualFSTest, WriteToReadOnlyMountThrows) {
-  EXPECT_THROW(vfs->writeFile("/bundle/new.js", "hack", 4), sfs::VFSError);
-  try {
-    vfs->writeFile("/bundle/new.js", "hack", 4);
-    FAIL() << "Expected VFSError";
-  } catch (const sfs::VFSError &e) {
-    EXPECT_EQ(e.code(), EACCES);
-  }
+TEST_F(VirtualFSTest, WriteToReadOnlyMount) {
+  auto r = vfs->writeFile("/bundle/new.js", "hack", 4);
+  EXPECT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), EACCES);
 }
 
-TEST_F(VirtualFSTest, UnmountedPathThrows) {
-  EXPECT_THROW(vfs->readFile("/other/file.txt"), sfs::VFSError);
-  try {
-    vfs->readFile("/other/file.txt");
-    FAIL() << "Expected VFSError";
-  } catch (const sfs::VFSError &e) {
-    EXPECT_EQ(e.code(), EACCES);
-  }
+TEST_F(VirtualFSTest, UnmountedPath) {
+  auto r = vfs->readFile("/other/file.txt");
+  EXPECT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), EACCES);
 }
 
-TEST_F(VirtualFSTest, ReaddirOnFileThrows) {
-  EXPECT_THROW(vfs->readdir("/home/sandbox/data.txt"), sfs::VFSError);
-  try {
-    vfs->readdir("/home/sandbox/data.txt");
-    FAIL() << "Expected VFSError";
-  } catch (const sfs::VFSError &e) {
-    EXPECT_EQ(e.code(), ENOENT);
-  }
+TEST_F(VirtualFSTest, ReaddirOnNonexistent) {
+  auto r = vfs->readdir("/home/sandbox/data.txt");
+  EXPECT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), ENOENT);
 }
 
 class MountOrderingTest : public ::testing::Test {
 protected:
   void SetUp() override {
     aFs = std::make_shared<sfs::MemFSBackend>();
-    aFs->writeFile("/f1.txt", "from-a", 6);
+    ASSERT_TRUE(aFs->writeFile("/f1.txt", "from-a", 6).has_value());
     bFs = std::make_shared<sfs::MemFSBackend>();
-    bFs->writeFile("/f2.txt", "from-b", 6);
+    ASSERT_TRUE(bFs->writeFile("/f2.txt", "from-b", 6).has_value());
     vfs = std::make_unique<sfs::VirtualFS>(std::vector<sfs::MountEntry>{
         {"/a/b", sfs::Perm::Read | sfs::Perm::Write, bFs},
         {"/a", sfs::Perm::Read | sfs::Perm::Write, aFs},
@@ -253,13 +259,21 @@ protected:
 };
 
 TEST_F(MountOrderingTest, LongestPrefixMatch) {
-  EXPECT_EQ(vfs->readFile("/a/f1.txt"), "from-a");
-  EXPECT_EQ(vfs->readFile("/a/b/f2.txt"), "from-b");
+  auto r1 = vfs->readFile("/a/f1.txt");
+  ASSERT_TRUE(r1.has_value());
+  EXPECT_EQ(*r1, "from-a");
+  auto r2 = vfs->readFile("/a/b/f2.txt");
+  ASSERT_TRUE(r2.has_value());
+  EXPECT_EQ(*r2, "from-b");
 }
 
 TEST_F(MountOrderingTest, Normalization) {
-  EXPECT_EQ(vfs->readFile("/a/./f1.txt"), "from-a");
-  EXPECT_EQ(vfs->readFile("/a/b/../f1.txt"), "from-a");
+  auto r1 = vfs->readFile("/a/./f1.txt");
+  ASSERT_TRUE(r1.has_value());
+  EXPECT_EQ(*r1, "from-a");
+  auto r2 = vfs->readFile("/a/b/../f1.txt");
+  ASSERT_TRUE(r2.has_value());
+  EXPECT_EQ(*r2, "from-a");
 }
 
 class RealFSTest : public ::testing::Test {
@@ -289,36 +303,37 @@ protected:
 TEST_F(RealFSTest, ReadInsideFile) {
   sfs::RealFSBackend realFs(sandboxDir);
   EXPECT_TRUE(realFs.exists("/inside.txt"));
-  EXPECT_EQ(realFs.readFile("/inside.txt"), "inside data");
+  auto content = realFs.readFile("/inside.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "inside data");
 }
 
 TEST_F(RealFSTest, WriteInsideFile) {
   sfs::RealFSBackend realFs(sandboxDir);
-  realFs.writeFile("/newfile.txt", "created", 7);
+  ASSERT_TRUE(realFs.writeFile("/newfile.txt", "created", 7).has_value());
   EXPECT_TRUE(realFs.exists("/newfile.txt"));
-  EXPECT_EQ(realFs.readFile("/newfile.txt"), "created");
+  auto content = realFs.readFile("/newfile.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "created");
 }
 
 TEST_F(RealFSTest, EscapeBlocked) {
   sfs::RealFSBackend realFs(sandboxDir);
-  EXPECT_THROW(realFs.readFile("/../outside/secret.txt"), sfs::VFSError);
-  try {
-    realFs.readFile("/../outside/secret.txt");
-    FAIL() << "Expected VFSError";
-  } catch (const sfs::VFSError &e) {
-    EXPECT_EQ(e.code(), EACCES);
-  }
+  auto r = realFs.readFile("/../outside/secret.txt");
+  EXPECT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), EACCES);
 }
 
 TEST_F(RealFSTest, ReaddirRoot) {
   sfs::RealFSBackend realFs(sandboxDir);
   auto entries = realFs.readdir("/");
-  EXPECT_GE(entries.size(), 1);
+  ASSERT_TRUE(entries.has_value());
+  EXPECT_GE(entries->size(), 1);
 }
 
 TEST_F(RealFSTest, UnlinkFile) {
   sfs::RealFSBackend realFs(sandboxDir);
-  realFs.unlink("/inside.txt");
+  ASSERT_TRUE(realFs.unlink("/inside.txt").has_value());
   EXPECT_FALSE(realFs.exists("/inside.txt"));
 }
 
@@ -358,18 +373,24 @@ protected:
 
 TEST_F(VirtualFSWithRealTest, ReadBundleThroughVFS) {
   EXPECT_TRUE(vfs->exists("/bundle/app.js"));
-  EXPECT_EQ(vfs->readFile("/bundle/app.js"), "const x = 1;");
+  auto content = vfs->readFile("/bundle/app.js");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "const x = 1;");
 }
 
 TEST_F(VirtualFSWithRealTest, WriteSandboxThroughVFS) {
-  vfs->writeFile("/home/sandbox/output.txt", "result", 6);
+  ASSERT_TRUE(vfs->writeFile("/home/sandbox/output.txt", "result", 6).has_value());
   EXPECT_TRUE(vfs->exists("/home/sandbox/output.txt"));
-  EXPECT_EQ(vfs->readFile("/home/sandbox/output.txt"), "result");
+  auto content = vfs->readFile("/home/sandbox/output.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "result");
 }
 
 TEST_F(VirtualFSWithRealTest, CrossMountCopy) {
-  vfs->writeFile("/home/sandbox/data.txt", "copied", 6);
-  vfs->copyFile("/home/sandbox/data.txt", "/home/sandbox/data2.txt");
+  ASSERT_TRUE(vfs->writeFile("/home/sandbox/data.txt", "copied", 6).has_value());
+  ASSERT_TRUE(vfs->copyFile("/home/sandbox/data.txt", "/home/sandbox/data2.txt").has_value());
   EXPECT_TRUE(vfs->exists("/home/sandbox/data2.txt"));
-  EXPECT_EQ(vfs->readFile("/home/sandbox/data2.txt"), "copied");
+  auto content = vfs->readFile("/home/sandbox/data2.txt");
+  ASSERT_TRUE(content.has_value());
+  EXPECT_EQ(*content, "copied");
 }

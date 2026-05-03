@@ -4,7 +4,6 @@
 
 #include <benchmark/benchmark.h>
 #include <filesystem>
-#include <fstream>
 
 namespace sfs = sandboxed_fs;
 namespace fs = std::filesystem;

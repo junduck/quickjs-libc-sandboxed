@@ -2,9 +2,9 @@
 
 #include <cerrno>
 #include <chrono>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string_view>
 
 namespace fs = std::filesystem;
@@ -105,9 +105,8 @@ static std::string_view stripLeadingSlash(const std::string &path) {
 RealFSBackend::RealFSBackend(fs::path realRoot) {
   std::error_code ec;
   m_root = fs::canonical(fs::absolute(realRoot), ec);
-  if (ec) {
-    throw VFSError(ec.value(), "RealFSBackend: cannot canonicalize root '" + realRoot.string() + "': " + ec.message());
-  }
+  if (ec)
+    throw std::runtime_error("RealFSBackend: cannot canonicalize root '" + realRoot.string() + "': " + ec.message());
 }
 
 // ---------------------------------------------------------------------------
@@ -123,25 +122,25 @@ fs::path RealFSBackend::makePath(const std::string &path) const {
   return m_root / rel;
 }
 
-std::string RealFSBackend::resolveExisting(const std::string &path) {
+std::expected<std::string, int> RealFSBackend::resolveExisting(const std::string &path) {
   auto fullPath = makePath(path);
   std::error_code ec;
   auto canonical = fs::canonical(fullPath, ec);
   if (ec)
-    throw VFSError(ec.value(), "RealFSBackend: '" + path + "': " + ec.message());
+    return std::unexpected(ec.value());
   if (!pathStartsWith(canonical, m_root))
-    throw VFSError(EACCES, "RealFSBackend: path escapes sandbox: '" + path + "'");
+    return std::unexpected(EACCES);
   return canonical.string();
 }
 
-std::string RealFSBackend::resolveCreating(const std::string &path) {
+std::expected<std::string, int> RealFSBackend::resolveCreating(const std::string &path) {
   auto fullPath = makePath(path);
   std::error_code ec;
   auto resolved = fs::weakly_canonical(fullPath, ec);
   if (ec)
-    throw VFSError(ec.value(), "RealFSBackend: '" + path + "': " + ec.message());
+    return std::unexpected(ec.value());
   if (!pathStartsWith(resolved, m_root))
-    throw VFSError(EACCES, "RealFSBackend: path escapes sandbox: '" + path + "'");
+    return std::unexpected(EACCES);
   return resolved.string();
 }
 
@@ -149,32 +148,38 @@ std::string RealFSBackend::resolveCreating(const std::string &path) {
 // readFile / readFileBytes
 // ---------------------------------------------------------------------------
 
-std::string RealFSBackend::readFile(const std::string &path) {
-  auto resolved = resolveExisting(path);
-  std::error_code ec;
-  auto sz = static_cast<size_t>(fs::file_size(resolved, ec));
-  if (ec)
-    throw VFSError(ec.value(), "readFile '" + path + "': " + ec.message());
+std::expected<std::string, int> RealFSBackend::readFile(const std::string &path) {
+  auto r = resolveExisting(path);
+  if (!r)
+    return std::unexpected(r.error());
 
-  std::ifstream in(resolved, std::ios::binary);
+  std::error_code ec;
+  auto sz = static_cast<size_t>(fs::file_size(*r, ec));
+  if (ec)
+    return std::unexpected(ec.value());
+
+  std::ifstream in(*r, std::ios::binary);
   if (!in)
-    throw VFSError(EACCES, "readFile '" + path + "': cannot open");
+    return std::unexpected(EACCES);
 
   std::string data(sz, '\0');
   in.read(data.data(), static_cast<std::streamsize>(sz));
   return data;
 }
 
-std::vector<uint8_t> RealFSBackend::readFileBytes(const std::string &path) {
-  auto resolved = resolveExisting(path);
-  std::error_code ec;
-  auto sz = static_cast<size_t>(fs::file_size(resolved, ec));
-  if (ec)
-    throw VFSError(ec.value(), "readFileBytes '" + path + "': " + ec.message());
+std::expected<std::vector<uint8_t>, int> RealFSBackend::readFileBytes(const std::string &path) {
+  auto r = resolveExisting(path);
+  if (!r)
+    return std::unexpected(r.error());
 
-  std::ifstream in(resolved, std::ios::binary);
+  std::error_code ec;
+  auto sz = static_cast<size_t>(fs::file_size(*r, ec));
+  if (ec)
+    return std::unexpected(ec.value());
+
+  std::ifstream in(*r, std::ios::binary);
   if (!in)
-    throw VFSError(EACCES, "readFileBytes '" + path + "': cannot open");
+    return std::unexpected(EACCES);
 
   std::vector<uint8_t> data(sz);
   in.read(reinterpret_cast<char *>(data.data()), static_cast<std::streamsize>(sz));
@@ -185,69 +190,94 @@ std::vector<uint8_t> RealFSBackend::readFileBytes(const std::string &path) {
 // writeFile / appendFile
 // ---------------------------------------------------------------------------
 
-void RealFSBackend::writeFile(const std::string &path, const void *data, size_t len) {
-  auto resolved = resolveCreating(path);
-  std::ofstream out(resolved, std::ios::binary | std::ios::trunc);
+std::expected<void, int> RealFSBackend::writeFile(const std::string &path, const void *data, size_t len) {
+  auto r = resolveCreating(path);
+  if (!r)
+    return std::unexpected(r.error());
+
+  std::ofstream out(*r, std::ios::binary | std::ios::trunc);
   if (!out)
-    throw VFSError(EACCES, "writeFile '" + path + "': cannot open");
+    return std::unexpected(EACCES);
   out.write(static_cast<const char *>(data), static_cast<std::streamsize>(len));
   if (!out)
-    throw VFSError(EIO, "writeFile '" + path + "': write failed");
+    return std::unexpected(EIO);
+  return {};
 }
 
-void RealFSBackend::appendFile(const std::string &path, const void *data, size_t len) {
-  auto resolved = resolveCreating(path);
-  std::ofstream out(resolved, std::ios::binary | std::ios::app);
+std::expected<void, int> RealFSBackend::appendFile(const std::string &path, const void *data, size_t len) {
+  auto r = resolveCreating(path);
+  if (!r)
+    return std::unexpected(r.error());
+
+  std::ofstream out(*r, std::ios::binary | std::ios::app);
   if (!out)
-    throw VFSError(EACCES, "appendFile '" + path + "': cannot open");
+    return std::unexpected(EACCES);
   out.write(static_cast<const char *>(data), static_cast<std::streamsize>(len));
   if (!out)
-    throw VFSError(EIO, "appendFile '" + path + "': write failed");
+    return std::unexpected(EIO);
+  return {};
 }
 
 // ---------------------------------------------------------------------------
 // unlink / mkdir / rmdir / readdir
 // ---------------------------------------------------------------------------
 
-void RealFSBackend::unlink(const std::string &path) {
-  auto resolved = resolveExisting(path);
+std::expected<void, int> RealFSBackend::unlink(const std::string &path) {
+  auto r = resolveExisting(path);
+  if (!r)
+    return std::unexpected(r.error());
+
   std::error_code ec;
-  fs::remove(resolved, ec);
+  fs::remove(*r, ec);
   if (ec)
-    throw VFSError(ec.value(), "unlink '" + path + "': " + ec.message());
+    return std::unexpected(ec.value());
+  return {};
 }
 
-void RealFSBackend::mkdir(const std::string &path, bool recursive, uint32_t mode) {
-  auto resolved = resolveCreating(path);
+std::expected<void, int> RealFSBackend::mkdir(const std::string &path, bool recursive, uint32_t mode) {
+  auto r = resolveCreating(path);
+  if (!r)
+    return std::unexpected(r.error());
+
   std::error_code ec;
-  if (recursive) {
-    fs::create_directories(resolved, ec);
-  } else {
-    fs::create_directory(resolved, ec);
-  }
+  if (recursive)
+    fs::create_directories(*r, ec);
+  else
+    fs::create_directory(*r, ec);
   if (ec)
-    throw VFSError(ec.value(), "mkdir '" + path + "': " + ec.message());
+    return std::unexpected(ec.value());
+
   if (mode != 0777) {
-    fs::permissions(resolved, modeToPerms(mode), fs::perm_options::replace, ec);
+    fs::permissions(*r, modeToPerms(mode), fs::perm_options::replace, ec);
+    if (ec)
+      return std::unexpected(ec.value());
   }
+  return {};
 }
 
-void RealFSBackend::rmdir(const std::string &path) {
-  auto resolved = resolveExisting(path);
+std::expected<void, int> RealFSBackend::rmdir(const std::string &path) {
+  auto r = resolveExisting(path);
+  if (!r)
+    return std::unexpected(r.error());
+
   std::error_code ec;
-  fs::remove(resolved, ec);
+  fs::remove(*r, ec);
   if (ec)
-    throw VFSError(ec.value(), "rmdir '" + path + "': " + ec.message());
+    return std::unexpected(ec.value());
+  return {};
 }
 
-std::vector<std::string> RealFSBackend::readdir(const std::string &path) {
-  auto resolved = resolveExisting(path);
+std::expected<std::vector<std::string>, int> RealFSBackend::readdir(const std::string &path) {
+  auto r = resolveExisting(path);
+  if (!r)
+    return std::unexpected(r.error());
+
   std::vector<std::string> entries;
   std::error_code ec;
-  for (const auto &entry : fs::directory_iterator(resolved, ec))
+  for (const auto &entry : fs::directory_iterator(*r, ec))
     entries.push_back(entry.path().filename().string());
   if (ec)
-    throw VFSError(ec.value(), "readdir '" + path + "': " + ec.message());
+    return std::unexpected(ec.value());
   return entries;
 }
 
@@ -255,7 +285,7 @@ std::vector<std::string> RealFSBackend::readdir(const std::string &path) {
 // stat / lstat
 // ---------------------------------------------------------------------------
 
-static Stat buildStat(const fs::path &resolved, fs::file_status st, bool /*followSymlinks*/) {
+static Stat buildStat(const fs::path &resolved, fs::file_status st) {
   Stat s;
   s.mode = fileTypeToMode(st.type()) | permsToMode(st.permissions());
 
@@ -276,22 +306,28 @@ static Stat buildStat(const fs::path &resolved, fs::file_status st, bool /*follo
   return s;
 }
 
-Stat RealFSBackend::stat(const std::string &path) {
-  auto resolved = resolveExisting(path);
+std::expected<Stat, int> RealFSBackend::stat(const std::string &path) {
+  auto r = resolveExisting(path);
+  if (!r)
+    return std::unexpected(r.error());
+
   std::error_code ec;
-  auto st = fs::status(resolved, ec);
+  auto st = fs::status(*r, ec);
   if (ec)
-    throw VFSError(ec.value(), "stat '" + path + "': " + ec.message());
-  return buildStat(resolved, st, true);
+    return std::unexpected(ec.value());
+  return buildStat(*r, st);
 }
 
-Stat RealFSBackend::lstat(const std::string &path) {
-  auto resolved = resolveExisting(path);
+std::expected<Stat, int> RealFSBackend::lstat(const std::string &path) {
+  auto r = resolveExisting(path);
+  if (!r)
+    return std::unexpected(r.error());
+
   std::error_code ec;
-  auto st = fs::symlink_status(resolved, ec);
+  auto st = fs::symlink_status(*r, ec);
   if (ec)
-    throw VFSError(ec.value(), "lstat '" + path + "': " + ec.message());
-  return buildStat(resolved, st, false);
+    return std::unexpected(ec.value());
+  return buildStat(*r, st);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,60 +344,77 @@ bool RealFSBackend::exists(const std::string &path) {
 // rename / copyFile
 // ---------------------------------------------------------------------------
 
-void RealFSBackend::rename(const std::string &oldPath, const std::string &newPath) {
-  auto resolvedOld = resolveExisting(oldPath);
-  auto resolvedNew = resolveCreating(newPath);
+std::expected<void, int> RealFSBackend::rename(const std::string &oldPath, const std::string &newPath) {
+  auto oldR = resolveExisting(oldPath);
+  if (!oldR)
+    return std::unexpected(oldR.error());
+  auto newR = resolveCreating(newPath);
+  if (!newR)
+    return std::unexpected(newR.error());
+
   std::error_code ec;
-  fs::rename(resolvedOld, resolvedNew, ec);
+  fs::rename(*oldR, *newR, ec);
   if (ec)
-    throw VFSError(ec.value(), "rename '" + oldPath + "' -> '" + newPath + "': " + ec.message());
+    return std::unexpected(ec.value());
+  return {};
 }
 
-void RealFSBackend::copyFile(const std::string &src, const std::string &dst) {
-  auto resolvedSrc = resolveExisting(src);
-  auto resolvedDst = resolveCreating(dst);
+std::expected<void, int> RealFSBackend::copyFile(const std::string &src, const std::string &dst) {
+  auto srcR = resolveExisting(src);
+  if (!srcR)
+    return std::unexpected(srcR.error());
+  auto dstR = resolveCreating(dst);
+  if (!dstR)
+    return std::unexpected(dstR.error());
+
   std::error_code ec;
-  fs::copy_file(resolvedSrc, resolvedDst, ec);
+  fs::copy_file(*srcR, *dstR, ec);
   if (ec)
-    throw VFSError(ec.value(), "copyFile '" + src + "' -> '" + dst + "': " + ec.message());
+    return std::unexpected(ec.value());
+  return {};
 }
 
 // ---------------------------------------------------------------------------
 // truncate / utimes / access
 // ---------------------------------------------------------------------------
 
-void RealFSBackend::truncate(const std::string &path, int64_t size) {
-  auto resolved = resolveExisting(path);
+std::expected<void, int> RealFSBackend::truncate(const std::string &path, int64_t size) {
+  auto r = resolveExisting(path);
+  if (!r)
+    return std::unexpected(r.error());
+
   std::error_code ec;
-  fs::resize_file(resolved, static_cast<uintmax_t>(size), ec);
+  fs::resize_file(*r, static_cast<uintmax_t>(size), ec);
   if (ec)
-    throw VFSError(ec.value(), "truncate '" + path + "': " + ec.message());
+    return std::unexpected(ec.value());
+  return {};
 }
 
-void RealFSBackend::utimes(const std::string &path, int64_t /*atimeMs*/, int64_t mtimeMs) {
-  auto resolved = resolveExisting(path);
+std::expected<void, int> RealFSBackend::utimes(const std::string &path, int64_t /*atimeMs*/, int64_t mtimeMs) {
+  auto r = resolveExisting(path);
+  if (!r)
+    return std::unexpected(r.error());
+
   std::error_code ec;
-  fs::last_write_time(resolved, fs::file_time_type(std::chrono::milliseconds(mtimeMs)), ec);
+  fs::last_write_time(*r, fs::file_time_type(std::chrono::milliseconds(mtimeMs)), ec);
   if (ec)
-    throw VFSError(ec.value(), "utimes '" + path + "': " + ec.message());
+    return std::unexpected(ec.value());
+  return {};
 }
 
 int RealFSBackend::access(const std::string &path, int mode) {
-  auto fullPath = makePath(path);
+  auto r = resolveExisting(path);
+  if (!r) return r.error();
+
   std::error_code ec;
-  auto st = fs::status(fullPath, ec);
-  if (ec)
-    return ENOENT;
-  if (mode == access_mode::F_OK)
-    return 0;
+  auto st = fs::status(*r, ec);
+  if (ec) return ENOENT;
+  if (mode == access_mode::F_OK) return 0;
 
   auto perms = st.permissions();
-  if ((mode & access_mode::R_OK) && (perms & fs::perms::owner_read) == fs::perms::none)
-    return EACCES;
-  if ((mode & access_mode::W_OK) && (perms & fs::perms::owner_write) == fs::perms::none)
-    return EACCES;
-  if ((mode & access_mode::X_OK) && (perms & fs::perms::owner_exec) == fs::perms::none)
-    return EACCES;
+  if ((mode & access_mode::R_OK) && (perms & fs::perms::owner_read) == fs::perms::none) return EACCES;
+  if ((mode & access_mode::W_OK) && (perms & fs::perms::owner_write) == fs::perms::none) return EACCES;
+  if ((mode & access_mode::X_OK) && (perms & fs::perms::owner_exec) == fs::perms::none) return EACCES;
   return 0;
 }
 
