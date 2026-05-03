@@ -45,9 +45,10 @@ public:
 private:
   std::filesystem::path m_root;
 
+  enum class ResolveMode { Existing, Creating };
+
   std::filesystem::path makePath(const std::string &path) const;
-  std::expected<std::string, int> resolveExisting(const std::string &path);
-  std::expected<std::string, int> resolveCreating(const std::string &path);
+  std::expected<std::string, int> resolve(const std::string &path, ResolveMode mode);
 };
 
 } // namespace sandboxed_fs

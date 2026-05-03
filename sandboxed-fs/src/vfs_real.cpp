@@ -87,9 +87,10 @@ static uint32_t fileTypeToMode(fs::file_type t) {
   }
 }
 
-static bool pathStartsWith(const fs::path &path, const fs::path &prefix) {
-  auto [mm, _] = std::mismatch(prefix.begin(), prefix.end(), path.begin(), path.end());
-  return mm == prefix.end();
+static bool isWithinRoot(const fs::path &path, const fs::path &root) {
+  auto rel = path.lexically_relative(root);
+  // Empty means path == root; non-empty without leading ".." means under root.
+  return rel.empty() || !rel.string().starts_with("..");
 }
 
 static std::string_view stripLeadingSlash(const std::string &path) {
@@ -126,43 +127,77 @@ fs::path RealFSBackend::makePath(const std::string &path) const {
   return m_root / rel;
 }
 
-std::expected<std::string, int> RealFSBackend::resolveExisting(const std::string &path) {
-  auto fullPath = makePath(path);
-  std::error_code ec;
-  auto canonical = fs::canonical(fullPath, ec);
-  if (ec)
-    return std::unexpected(ec.value());
-  if (!pathStartsWith(canonical, m_root))
-    return std::unexpected(EACCES);
-  return canonical.string();
-}
+// ---------------------------------------------------------------------------
+// Path resolution — the single gate for ALL real filesystem access.
+// ---------------------------------------------------------------------------
+//
+// ResolveMode::Existing  – requires the path to exist; uses canonical()
+//                          which fully resolves all symlinks.
+// ResolveMode::Creating  – the path may not exist yet.  Tries canonical()
+//                          first (for existing targets); falls back to
+//                          weakly_canonical + a dangling-symlink guard.
 
-std::expected<std::string, int> RealFSBackend::resolveCreating(const std::string &path) {
+std::expected<std::string, int> RealFSBackend::resolve(const std::string &path, ResolveMode mode) {
   auto fullPath = makePath(path);
-  std::error_code ec;
-  auto resolved = fs::weakly_canonical(fullPath, ec);
-  if (ec)
-    return std::unexpected(ec.value());
-  if (!pathStartsWith(resolved, m_root))
-    return std::unexpected(EACCES);
 
-  // Guard against dangling symlinks: weakly_canonical does not resolve
-  // symlink targets that don't exist, so a symlink pointing outside
-  // the sandbox would pass the prefix check.  Resolve the target.
-  auto linkSt = fs::symlink_status(resolved, ec);
-  if (!ec && fs::is_symlink(linkSt)) {
-    auto target = fs::read_symlink(resolved, ec);
-    if (ec)
-      return std::unexpected(ec.value());
-    auto absTarget = target.is_absolute() ? target : resolved.parent_path() / target;
-    auto canonTarget = fs::weakly_canonical(absTarget, ec);
-    if (ec)
+  using enum ResolveMode;
+
+  if (mode == Existing) {
+    std::error_code ec;
+    auto canonical = fs::canonical(fullPath, ec);
+    if (!ec) {
+      if (!isWithinRoot(canonical, m_root))
+        return std::unexpected(EACCES);
+      return canonical.string();
+    }
+    // canonical failed — check where the path WOULD resolve to.
+    // (side-channel defence: return EACCES, not ENOENT, for paths
+    //  that resolve outside the sandbox even if the file is missing.)
+    auto savedEc = ec;
+    auto resolved = fs::weakly_canonical(fullPath, ec);
+    if (!ec && !isWithinRoot(resolved, m_root))
       return std::unexpected(EACCES);
-    if (!pathStartsWith(canonTarget, m_root))
-      return std::unexpected(EACCES);
+    return std::unexpected(savedEc.value());
   }
 
-  return resolved.string();
+  // mode == Creating — try canonical first, fall back to weakly_canonical.
+  {
+    std::error_code ec;
+    auto canonical = fs::canonical(fullPath, ec);
+    if (!ec) {
+      if (!isWithinRoot(canonical, m_root))
+        return std::unexpected(EACCES);
+      return canonical.string();
+    }
+  }
+
+  // Path doesn't exist yet — weakly_canonical canonicalises the leading
+  // existing portion and appends the remainder.  The dangling-symlink
+  // guard below catches symlinks whose targets haven't been created.
+  {
+    std::error_code ec;
+    auto resolved = fs::weakly_canonical(fullPath, ec);
+    if (ec)
+      return std::unexpected(ec.value());
+    if (!isWithinRoot(resolved, m_root))
+      return std::unexpected(EACCES);
+
+    // Guard: if the resolved result IS a symlink, check where it points.
+    auto linkSt = fs::symlink_status(resolved, ec);
+    if (!ec && fs::is_symlink(linkSt)) {
+      auto target = fs::read_symlink(resolved, ec);
+      if (ec)
+        return std::unexpected(ec.value());
+      auto absTarget = target.is_absolute() ? target : resolved.parent_path() / target;
+      auto canonTarget = fs::weakly_canonical(absTarget, ec);
+      if (ec)
+        return std::unexpected(EACCES);
+      if (!isWithinRoot(canonTarget, m_root))
+        return std::unexpected(EACCES);
+    }
+
+    return resolved.string();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +205,7 @@ std::expected<std::string, int> RealFSBackend::resolveCreating(const std::string
 // ---------------------------------------------------------------------------
 
 std::expected<std::string, int> RealFSBackend::readFile(const std::string &path) {
-  auto r = resolveExisting(path);
+  auto r = resolve(path, ResolveMode::Existing);
   if (!r)
     return std::unexpected(r.error());
 
@@ -182,7 +217,7 @@ std::expected<std::string, int> RealFSBackend::readFile(const std::string &path)
 }
 
 std::expected<std::vector<uint8_t>, int> RealFSBackend::readFileBytes(const std::string &path) {
-  auto r = resolveExisting(path);
+  auto r = resolve(path, ResolveMode::Existing);
   if (!r)
     return std::unexpected(r.error());
 
@@ -198,7 +233,7 @@ std::expected<std::vector<uint8_t>, int> RealFSBackend::readFileBytes(const std:
 // ---------------------------------------------------------------------------
 
 std::expected<void, int> RealFSBackend::writeFile(const std::string &path, const void *data, size_t len) {
-  auto r = resolveCreating(path);
+  auto r = resolve(path, ResolveMode::Creating);
   if (!r)
     return std::unexpected(r.error());
 
@@ -212,7 +247,7 @@ std::expected<void, int> RealFSBackend::writeFile(const std::string &path, const
 }
 
 std::expected<void, int> RealFSBackend::appendFile(const std::string &path, const void *data, size_t len) {
-  auto r = resolveCreating(path);
+  auto r = resolve(path, ResolveMode::Creating);
   if (!r)
     return std::unexpected(r.error());
 
@@ -230,7 +265,7 @@ std::expected<void, int> RealFSBackend::appendFile(const std::string &path, cons
 // ---------------------------------------------------------------------------
 
 std::expected<void, int> RealFSBackend::unlink(const std::string &path) {
-  auto r = resolveExisting(path);
+  auto r = resolve(path, ResolveMode::Existing);
   if (!r)
     return std::unexpected(r.error());
 
@@ -242,7 +277,7 @@ std::expected<void, int> RealFSBackend::unlink(const std::string &path) {
 }
 
 std::expected<void, int> RealFSBackend::mkdir(const std::string &path, bool recursive, uint32_t mode) {
-  auto r = resolveCreating(path);
+  auto r = resolve(path, ResolveMode::Creating);
   if (!r)
     return std::unexpected(r.error());
 
@@ -263,7 +298,7 @@ std::expected<void, int> RealFSBackend::mkdir(const std::string &path, bool recu
 }
 
 std::expected<void, int> RealFSBackend::rmdir(const std::string &path) {
-  auto r = resolveExisting(path);
+  auto r = resolve(path, ResolveMode::Existing);
   if (!r)
     return std::unexpected(r.error());
 
@@ -275,7 +310,7 @@ std::expected<void, int> RealFSBackend::rmdir(const std::string &path) {
 }
 
 std::expected<std::vector<std::string>, int> RealFSBackend::readdir(const std::string &path) {
-  auto r = resolveExisting(path);
+  auto r = resolve(path, ResolveMode::Existing);
   if (!r)
     return std::unexpected(r.error());
 
@@ -316,7 +351,7 @@ static std::expected<Stat, int> buildStat(const fs::path &resolved, fs::file_sta
 }
 
 std::expected<Stat, int> RealFSBackend::stat(const std::string &path) {
-  auto r = resolveExisting(path);
+  auto r = resolve(path, ResolveMode::Existing);
   if (!r)
     return std::unexpected(r.error());
 
@@ -328,7 +363,7 @@ std::expected<Stat, int> RealFSBackend::stat(const std::string &path) {
 }
 
 std::expected<Stat, int> RealFSBackend::lstat(const std::string &path) {
-  auto r = resolveExisting(path);
+  auto r = resolve(path, ResolveMode::Existing);
   if (!r)
     return std::unexpected(r.error());
 
@@ -340,20 +375,22 @@ std::expected<Stat, int> RealFSBackend::lstat(const std::string &path) {
 }
 
 // ---------------------------------------------------------------------------
-// exists  (now uses resolveExisting — no sandbox bypass)
+// exists  (now uses resolve — no sandbox bypass)
 // ---------------------------------------------------------------------------
 
-bool RealFSBackend::exists(const std::string &path) { return resolveExisting(path).has_value(); }
+bool RealFSBackend::exists(const std::string &path) {
+  return resolve(path, ResolveMode::Existing).has_value();
+}
 
 // ---------------------------------------------------------------------------
 // rename / copyFile
 // ---------------------------------------------------------------------------
 
 std::expected<void, int> RealFSBackend::rename(const std::string &oldPath, const std::string &newPath) {
-  auto oldR = resolveExisting(oldPath);
+  auto oldR = resolve(oldPath, ResolveMode::Existing);
   if (!oldR)
     return std::unexpected(oldR.error());
-  auto newR = resolveCreating(newPath);
+  auto newR = resolve(newPath, ResolveMode::Creating);
   if (!newR)
     return std::unexpected(newR.error());
 
@@ -365,10 +402,10 @@ std::expected<void, int> RealFSBackend::rename(const std::string &oldPath, const
 }
 
 std::expected<void, int> RealFSBackend::copyFile(const std::string &src, const std::string &dst) {
-  auto srcR = resolveExisting(src);
+  auto srcR = resolve(src, ResolveMode::Existing);
   if (!srcR)
     return std::unexpected(srcR.error());
-  auto dstR = resolveCreating(dst);
+  auto dstR = resolve(dst, ResolveMode::Creating);
   if (!dstR)
     return std::unexpected(dstR.error());
 
@@ -386,7 +423,7 @@ std::expected<void, int> RealFSBackend::copyFile(const std::string &src, const s
 std::expected<void, int> RealFSBackend::truncate(const std::string &path, int64_t size) {
   if (size < 0)
     return std::unexpected(EINVAL);
-  auto r = resolveExisting(path);
+  auto r = resolve(path, ResolveMode::Existing);
   if (!r)
     return std::unexpected(r.error());
 
@@ -399,7 +436,7 @@ std::expected<void, int> RealFSBackend::truncate(const std::string &path, int64_
 
 std::expected<void, int> RealFSBackend::utimes(const std::string &path, int64_t /*atimeMs*/, int64_t mtimeMs) {
   // std::filesystem only exposes last_write_time; atime cannot be set portably.
-  auto r = resolveExisting(path);
+  auto r = resolve(path, ResolveMode::Existing);
   if (!r)
     return std::unexpected(r.error());
 
@@ -412,7 +449,7 @@ std::expected<void, int> RealFSBackend::utimes(const std::string &path, int64_t 
 }
 
 int RealFSBackend::access(const std::string &path, int mode) {
-  auto r = resolveExisting(path);
+  auto r = resolve(path, ResolveMode::Existing);
   if (!r)
     return r.error();
 
@@ -420,15 +457,15 @@ int RealFSBackend::access(const std::string &path, int mode) {
   auto st = fs::status(*r, ec);
   if (ec)
     return ENOENT;
-  if (mode == access_mode::F_OK)
+  if (mode == access_mode::kExist)
     return 0;
 
   auto perms = st.permissions();
-  if ((mode & access_mode::R_OK) && (perms & fs::perms::owner_read) == fs::perms::none)
+  if ((mode & access_mode::kRead) && (perms & fs::perms::owner_read) == fs::perms::none)
     return EACCES;
-  if ((mode & access_mode::W_OK) && (perms & fs::perms::owner_write) == fs::perms::none)
+  if ((mode & access_mode::kWrite) && (perms & fs::perms::owner_write) == fs::perms::none)
     return EACCES;
-  if ((mode & access_mode::X_OK) && (perms & fs::perms::owner_exec) == fs::perms::none)
+  if ((mode & access_mode::kExec) && (perms & fs::perms::owner_exec) == fs::perms::none)
     return EACCES;
   return 0;
 }
