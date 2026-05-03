@@ -113,7 +113,7 @@ std::expected<VirtualFS::Resolved, int> VirtualFS::resolve(const std::string &pa
       if (mount.backendPath.size() > 1)  // not just "/"
         subPath = mount.backendPath + subPath;
     }
-    return Resolved{mount.backend.get(), subPath};
+    return Resolved{mount.backend.get(), std::move(subPath)};
   }
 
   return std::unexpected(EACCES);
