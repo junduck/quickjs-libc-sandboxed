@@ -13,13 +13,15 @@ sandboxed-fs/
 │   ├── vfs_mem.hpp      MemFSBackend (in-memory tree)
 │   └── vfs.hpp          VirtualFS (mount router, composite)
 ├── src/
-│   ├── vfs.cpp          VirtualFS::resolve, normalize, dispatch macros
-│   ├── vfs_real.cpp     RealFS impl: canonical/weakly_canonical gate
-│   └── vfs_mem.cpp      MemFS impl: recursive map walk
+│   ├── vfs.cpp          VirtualFS::resolve, normalize, dispatch macros, backend conflict check
+│   ├── vfs_real.cpp     RealFS impl: unified resolve() gate with canonical/weakly_canonical + side-channel guard
+│   └── vfs_mem.cpp      MemFS impl: string_view splitPath, inline tree walk, find+emplace
 ├── tests/
-│   ├── test_vfs.cpp      32 unit tests (MemFS, RealFS, VirtualFS)
-│   ├── test_security.cpp 48 isolation tests (escape, symlink, mount)
-│   └── bench_vfs.cpp     Micro-benchmarks (read/write/route overhead)
+│   ├── test_vfs.cpp         33 unit tests (MemFS, RealFS, VirtualFS)
+│   ├── test_security.cpp    49 isolation tests (escape, symlink, mount, side-channel)
+│   ├── demo_bug.cpp         Overlapping mounts + same backend demo
+│   ├── demo_escape.cpp      Symlink escape demo
+│   └── bench_vfs.cpp        Micro-benchmarks (read/write/route overhead)
 └── CMakeLists.txt
 ```
 
@@ -27,56 +29,77 @@ sandboxed-fs/
 
 ```
 VFSBackend  (abstract, vfs_backend.hpp)
-  ├── RealFSBackend  (disk, canonical gates)
-  ├── MemFSBackend   (in-memory tree)
-  └── VirtualFS      (mount router, IS-A VFSBackend)
+  ├── RealFSBackend  (disk, unified resolve gate with canonical/weakly_canonical)
+  ├── MemFSBackend   (in-memory tree, string_view splitPath, inline parentDir)
+  └── VirtualFS      (mount router, backendPath + perm conflict detection)
 ```
 
 ## VirtualFS Resolution Algorithm
 
 ```
 resolve(virtualPath, neededPerm):
-  1. normPath = normalize(virtualPath)      // collapse . , resolve .. , // → /
+  1. normPath = normalize(virtualPath)        // collapse . , resolve .. , \\ → /
   2. for each mount in m_mounts (sorted prefix-descending):
-       if normPath == mount.prefix  OR  normPath.starts_with(mount.prefix + "/"):
-         if (mount.perm & neededPerm) != neededPerm → return EACCES
-         subPath = normPath.drop(mount.prefix.size())
-         if subPath empty → subPath = "/"
-         return {mount.backend, subPath}
-  3. return EACCES
+       if mount.prefix == "/" → root catch-all
+       if normPath doesn't start with prefix → continue
+       if no '/' at prefix boundary (and not exact match) → continue
+       if (mount.perm & neededPerm) != neededPerm → EACCES
+       subPath = normPath == prefix ? backendPath : normPath.drop(prefix.size())
+       if backendPath != "/" → prepend backendPath to subPath
+       return {mount.backend, subPath}
+  3. EACCES
 ```
 
-Mounts sorted longest-first. `VirtualFS::mount()` inserts via `lower_bound` (O(n)), not full sort.
+Mounts sorted longest-first. Constructor and `mount()` both detect same-backend-with-conflicting-permissions and throw `std::invalid_argument`.
+
+## MountEntry
+
+```cpp
+struct MountEntry {
+    std::string prefix;                  // "/bundle", "/home/sandbox", "/"
+    Perm perm;                           // Read, Write, or Read | Write
+    std::shared_ptr<VFSBackend> backend;
+    std::string backendPath = "/";       // path within backend this prefix maps to
+};
+```
+
+`backendPath` handles overlapping mounts sharing a backend:
+```
+{"/app",     Perm::Read,          memFs},          // backendPath defaults to "/"
+{"/app/sub", Perm::Read,          memFs,  "/sub"}, // explicit sub-path
+```
 
 ## RealFS Sandbox Gate
 
 ```
-resolveExisting(path):    // for ops on paths that must exist
-  full = makePath(path)   // root + stripLeadingSlash(path)
-  canonical = fs::canonical(full)
-  if !pathStartsWith(canonical, m_root) → EACCES
+resolve(path, ResolveMode) — single entry point for ALL filesystem access:
 
-resolveCreating(path):    // for ops creating new paths
-  full = makePath(path)
-  resolved = fs::weakly_canonical(full)
-  if !pathStartsWith(resolved, m_root) → EACCES
+  Existing mode:  // path must exist (readFile, stat, unlink, ...)
+    full = makePath(path)
+    canonical = fs::canonical(full)
+    if !isWithinRoot(canonical, m_root) → EACCES
+    if canonical failed → weakly_canonical + isWithinRoot guard  // side-channel: never return ENOENT for outside-sandbox paths
 
-makePath(path):
-  strip leading '/' from path
-  return m_root / stripped  (but path("/","/") → m_root directly)
+  Creating mode:  // path may not exist yet (writeFile, mkdir, ...)
+    full = makePath(path)
+    try canonical first (handles existing targets)
+    fallback: weakly_canonical + dangling-symlink guard
+    guard: symlink_status → read_symlink → weakly_canonical → isWithinRoot check
+
+isWithinRoot(path, root):
+    rel = path.lexically_relative(root)
+    return rel.empty() || *rel.begin() != ".."
 ```
 
 ## VFSBackend Methods
 
-All paths are relative to backend root.
-
 ```
 // returns expected<T, int>
-readFile(path)   → expected<string, int>
+readFile(path)     → expected<string, int>
 readFileBytes(path) → expected<vector<uint8_t>, int>
-readdir(path)    → expected<vector<string>, int>
-stat(path)       → expected<Stat, int>          // follows symlinks
-lstat(path)      → expected<Stat, int>          // does not follow
+readdir(path)      → expected<vector<string>, int>
+stat(path)         → expected<Stat, int>          // follows symlinks
+lstat(path)        → expected<Stat, int>          // does not follow
 
 // returns expected<void, int>
 writeFile(path, data_ptr, len)
@@ -90,10 +113,10 @@ truncate(path, size)
 utimes(path, atimeMs, mtimeMs)
 
 // returns bool
-exists(path)     // false on sandbox rejection OR missing file
+exists(path)       // false on sandbox rejection OR missing file
 
 // returns int (0 or errno)
-access(path, mode)  // mode: F_OK=0, R_OK=4, W_OK=2, X_OK=1
+access(path, mode) // mode uses access_mode::kExist/kRead/kWrite/kExec
 ```
 
 ## MemFS Internal Structure
@@ -105,8 +128,8 @@ Node {
   map<string, unique_ptr<Node>> children;        // directory entries
 }
 
-walkTo(path) → splits path on '/', walks tree, returns Node* or ENOENT
-parentDir(path) → walks parent, returns parent Node* or error
+walkTo(path)    → splits path with string_view tokenizer, walks tree, returns Node* or ENOENT
+parentDir(path) → same split, pops last, inline tree walk to parent, returns Node* or error
 ```
 
 ## Usage Pattern (Copy-Paste)
@@ -126,6 +149,12 @@ bundle->writeFile("/app.js", "console.log('hi')", 18);
 VirtualFS vfs({
     {"/bundle",       Perm::Read,                     bundle},
     {"/home/sandbox", Perm::Read | Perm::Write,       sandbox},
+});
+
+// same backend, overlapping mounts — use backendPath
+VirtualFS vfs2({
+    {"/app",     Perm::Read,                    memFs},
+    {"/app/sub", Perm::Read,                    memFs, "/sub"},
 });
 
 // read
@@ -169,17 +198,28 @@ RealFSBackend fills: mode, size, nlink, mtimeMs. Others = 0.
 MemFSBackend fills:  all fields.
 ```
 
+## access_mode Constants
+
+```
+access_mode::kExist  (0)    F_OK  — existence check
+access_mode::kRead   (4)    R_OK  — read permission
+access_mode::kWrite  (2)    W_OK  — write permission
+access_mode::kExec   (1)    X_OK  — execute permission
+```
+
+Names deliberately avoid POSIX macro clashes (`F_OK`/`R_OK`/`W_OK`/`X_OK` are macros in `<unistd.h>`).
+
 ## Error Codes
 
 ```
 ENOENT (2)    File/dir not found
-EACCES (13)   Sandbox permission denied, RO mount, unmounted path
+EACCES (13)   Sandbox permission denied, RO mount, unmounted path, outside-sandbox path
 EISDIR (21)   Is a directory
 ENOTDIR (20)  Not a directory
 ENOTEMPTY (66) Directory not empty
 EEXIST (17)   File already exists
 EXDEV (18)    Cross-device rename
-EINVAL (22)   Invalid argument (negative truncate size)
+EINVAL (22)   Invalid argument (negative truncate size, rename into own child)
 EIO (5)       I/O write failure
 ```
 
@@ -187,15 +227,18 @@ EIO (5)       I/O write failure
 
 ```
 .. traversal       ✓ blocked  VirtualFS: prefix match + RealFS: canonical gate
-symlink escape     ✓ blocked  fs::canonical resolves links → prefix check fails
+symlink escape     ✓ blocked  realpath resolves links; lexically_relative catches escaping .. in non-existing tail
+dangling symlink   ✓ blocked  resolveCreating: symlink_status → read_symlink → target containment check
 // double slash    ✓ blocked  normalized to /
 write to RO mount  ✓ blocked  Perm check before backend dispatch
 unmounted path     ✓ blocked  no mount match → EACCES
 mount prefix conf. ✓ blocked  /bundlex ≠ /bundle; exact or prefix+'/' match
 cross-mount rename ✓ blocked  different backends → EXDEV
 root write/unlink  ✓ blocked  MemFS: EACCES; VirtualFS: prefix match
-exists() bypass    ✓ blocked  RealFS::exists → resolveExisting (canonical gate)
+exists() bypass    ✓ blocked  RealFS::exists → resolve(Existing) (canonical gate)
 access() bypass    ✓ blocked  VirtualFS::access → resolve(neededPermForAccess(mode))
+same-backend RW/RO ✓ blocked  VirtualFS constructor + mount() throw on backend perm conflict
+side-channel       ✓ blocked  Existing mode guard: never returns ENOENT for outside-sandbox paths
 ```
 
 ## Build
@@ -203,8 +246,9 @@ access() bypass    ✓ blocked  VirtualFS::access → resolve(neededPermForAcces
 ```
 cmake -B build -DBUILD_TESTS=ON
 cmake --build build
-ctest --test-dir build          # 80 tests: 32 unit + 48 security
+ctest --test-dir build          # 82 tests: 33 unit + 49 security
 build/sandboxed-fs/tests/bench_vfs  # benchmarks
+build/sandboxed-fs/tests/demo_bug   # overlapping mount demo
 ```
 
 Requires: C++23 compiler, CMake ≥ 3.20. GTest/GBench auto-fetched via FetchContent.
