@@ -4,7 +4,6 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
 #include <stdexcept>
 #include <string_view>
 
@@ -89,8 +88,9 @@ static uint32_t fileTypeToMode(fs::file_type t) {
 
 static bool isWithinRoot(const fs::path &path, const fs::path &root) {
   auto rel = path.lexically_relative(root);
-  // Empty means path == root; non-empty without leading ".." means under root.
-  return rel.empty() || !rel.string().starts_with("..");
+  if (rel.empty()) return true;
+  auto it = rel.begin();
+  return it != rel.end() && *it != "..";
 }
 
 static std::string_view stripLeadingSlash(const std::string &path) {
@@ -209,11 +209,20 @@ std::expected<std::string, int> RealFSBackend::readFile(const std::string &path)
   if (!r)
     return std::unexpected(r.error());
 
-  std::ifstream in(*r, std::ios::binary);
+  std::ifstream in(*r, std::ios::binary | std::ios::ate);
   if (!in)
     return std::unexpected(EACCES);
 
-  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  auto size = in.tellg();
+  if (size < 0)
+    size = 0;
+  in.seekg(0, std::ios::beg);
+
+  std::string result(static_cast<size_t>(size), '\0');
+  in.read(result.data(), size);
+  if (!in && !in.eof())
+    return std::unexpected(EIO);
+  return result;
 }
 
 std::expected<std::vector<uint8_t>, int> RealFSBackend::readFileBytes(const std::string &path) {
@@ -221,11 +230,20 @@ std::expected<std::vector<uint8_t>, int> RealFSBackend::readFileBytes(const std:
   if (!r)
     return std::unexpected(r.error());
 
-  std::ifstream in(*r, std::ios::binary);
+  std::ifstream in(*r, std::ios::binary | std::ios::ate);
   if (!in)
     return std::unexpected(EACCES);
 
-  return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  auto size = in.tellg();
+  if (size < 0)
+    size = 0;
+  in.seekg(0, std::ios::beg);
+
+  std::vector<uint8_t> result(static_cast<size_t>(size));
+  in.read(reinterpret_cast<char *>(result.data()), size);
+  if (!in && !in.eof())
+    return std::unexpected(EIO);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +333,7 @@ std::expected<std::vector<std::string>, int> RealFSBackend::readdir(const std::s
     return std::unexpected(r.error());
 
   std::vector<std::string> entries;
+  entries.reserve(256);
   std::error_code ec;
   for (const auto &entry : fs::directory_iterator(*r, ec))
     entries.push_back(entry.path().filename().string());
