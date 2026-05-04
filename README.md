@@ -6,13 +6,13 @@ A sandboxed standard library for QuickJS — No engine patches. No exceptions. C
 
 Build a drop-in replacement for QuickJS's `libc` (`std` + `os` modules) that sandboxes every OS interaction. When a JS worker calls `readFile("/etc/passwd")`, it should get `EACCES`, not raw POSIX access.
 
-Architecture: C++ primitives → C bridge (`extern "C"`) → QuickJS `JSCFunctionListEntry` modules.
+Architecture: we link to QuickJS (C library, submodule). Our C++ code calls QuickJS C API directly and registers JSCFunction bindings that route into SandboxContext methods. No intermediate C shim — just C++ calling C.
 
 ## Design Rules
 
 | Rule | Why |
 |------|-----|
-| `std::expected<T, int>` returns, never exceptions | Clean C-ABI bridge later |
+| `std::expected<T, int>` returns, never exceptions | Composability across module boundaries |
 | C++23 standard library + Boost only | No platform `#ifdef`s |
 | Every op goes through a single resolution gate | No scattered security checks |
 | No engine core changes | Drop-in libc replacement |
@@ -34,9 +34,6 @@ Architecture: C++ primitives → C bridge (`extern "C"`) → QuickJS `JSCFunctio
                       Wraps asio transport layer, verifyAddress rejects path-like addrs.
 
 📋 sandboxed-rand     Entropy passthrough: wraps std::random_device. Side effect unavoidable.
-
-📋 QuickJS bridge      C++ → C shim layer. Maps std::expected returns to JS values/errors.
-                      JS_NewCModule pattern from quickjs-libc.c.
 
 📋 Non-sandboxed      url, encoding, crypto-hash, stream, path, timers, fetch/http (boost.beast)
                       Pure logic or controlled network — no sandbox policy needed.
@@ -61,8 +58,7 @@ quickjs-libc-sandboxed/
 ├── sandboxed-proc/                  📋 planned
 ├── sandboxed-net/                   📋 planned
 ├── sandboxed-rand/                  📋 planned
-├── quickjs/                         QuickJS engine (upstream, unmodified)
-├── quickjs.h                        Symlink to quickjs/quickjs.h
+├── quickjs/                         QuickJS engine (submodule, unmodified)
 └── refs/                            Reference implementations
 ```
 
