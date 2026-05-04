@@ -15,8 +15,16 @@ void Primordials::cache(JSContext *ctx) {
 
   Object_prototype = JS_GetPropertyStr(ctx, Object, "prototype");
   Array_prototype = JS_GetPropertyStr(ctx, Array, "prototype");
-  Function_prototype = JS_GetPropertyStr(ctx, JS_GetPropertyStr(ctx, global, "Function"), "prototype");
-  String_prototype = JS_GetPropertyStr(ctx, JS_GetPropertyStr(ctx, global, "String"), "prototype");
+  {
+    JSValue func_ctor = JS_GetPropertyStr(ctx, global, "Function");
+    Function_prototype = JS_GetPropertyStr(ctx, func_ctor, "prototype");
+    JS_FreeValue(ctx, func_ctor);
+  }
+  {
+    JSValue str_ctor = JS_GetPropertyStr(ctx, global, "String");
+    String_prototype = JS_GetPropertyStr(ctx, str_ctor, "prototype");
+    JS_FreeValue(ctx, str_ctor);
+  }
   Map_prototype = JS_GetPropertyStr(ctx, Map, "prototype");
   Set_prototype = JS_GetPropertyStr(ctx, Set, "prototype");
   Promise_prototype = JS_GetPropertyStr(ctx, Promise, "prototype");
