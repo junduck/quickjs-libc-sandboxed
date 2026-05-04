@@ -38,7 +38,7 @@ int main() {
                 clearInterval(id);
                 print("interval cleared");
                 setTimeout(() => {
-                    print("final timer — event loop will exit after this");
+                    print("final timer — event loop exits naturally");
                 }, 20);
             }
         }, 15);

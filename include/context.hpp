@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -10,6 +11,10 @@
 
 #include "context_state.hpp"
 #include "primordials.hpp"
+
+struct JsError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 
 class SandboxContext {
 public:
@@ -29,6 +34,10 @@ public:
   int64_t scheduleTimer(JSValue func, int64_t ms, bool repeating);
   void cancelTimer(int64_t id);
 
+  // --- Error helpers ---
+  void assertOk(JSValue v);
+  [[noreturn]] void throwJsError();
+
   JSContext *js_ctx() const { return js_ctx_; }
   boost::asio::io_context &io_ctx() { return io_ctx_; }
   const Config &config() const { return config_; }
@@ -38,19 +47,15 @@ public:
   ~SandboxContext();
 
 private:
-  // --- Event loop phases ---
   void drainMicrotasks();
-
-  // --- Timer internals ---
+  void checkUnhandledRejections();
   void processExpiredTimers();
   void armNextTimer();
+  void reportFatal(const JsError &e);
 
-  // --- Standard error path ---
-  void reportError();
+  static std::string jsValueToString(JSContext *ctx, JSValue v);
 
-  auto checkUnhandledRejections() -> bool;
-
-  static void promiseRejectionTracker(JSContext *ctx, JSValue promise, JSValue reason, JS_BOOL is_handled, void *opaque);
+  static void promiseRejectionTracker(JSContext *ctx, JSValueConst promise, JSValueConst reason, JS_BOOL is_handled, void *opaque);
 
   JSContext *js_ctx_ = nullptr;
   boost::asio::io_context io_ctx_;
