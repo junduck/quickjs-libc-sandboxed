@@ -76,8 +76,15 @@ add_library(sandboxed-core STATIC
     src/context.cpp
     src/promise.cpp
     src/primordials.cpp
+    src/bindings/timers.cpp
+    src/bindings/print.cpp
 )
 
 target_include_directories(sandboxed-core PUBLIC include)
 target_link_libraries(sandboxed-core PUBLIC Boost::headers quickjs sandboxed-fs)
 target_compile_features(sandboxed-core PUBLIC cxx_std_23)
+
+# --- Demo ---
+
+add_executable(sandboxed-demo demo/main.cpp)
+target_link_libraries(sandboxed-demo PRIVATE sandboxed-core)

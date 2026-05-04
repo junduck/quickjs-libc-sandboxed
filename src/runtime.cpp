@@ -33,6 +33,7 @@ void SandboxRuntime::shutdown() {
   contexts_.clear();
 
   if (rt_) {
+    JS_RunGC(rt_);
     JS_FreeRuntime(rt_);
     rt_ = nullptr;
   }
