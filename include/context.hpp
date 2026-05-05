@@ -12,6 +12,8 @@
 #include "context_state.hpp"
 #include "primordials.hpp"
 
+struct IOResource;
+
 struct JsError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
@@ -33,6 +35,10 @@ public:
   // --- Timer API (called by JS bindings) ---
   int64_t scheduleTimer(JSValue func, int64_t ms, bool repeating);
   void cancelTimer(int64_t id);
+
+  // --- I/O Resource registry ---
+  void registerResource(IOResource *r);
+  void unregisterResource(IOResource *r);
 
   // --- Error helpers ---
   void assertOk(JSValue v);

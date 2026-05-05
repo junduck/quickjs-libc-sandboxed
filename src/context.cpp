@@ -1,4 +1,5 @@
 #include "context.hpp"
+#include "io_resource.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -8,6 +9,7 @@ using namespace std::chrono;
 
 void registerTimers(SandboxContext *sctx);
 void registerPrint(SandboxContext *sctx);
+void registerSocket(SandboxContext *sctx);
 
 // ─── Error helpers ─────────────────────────────────────────────────
 
@@ -62,7 +64,19 @@ SandboxContext::~SandboxContext() {
     }
     state_.pending_rejections.clear();
 
+    for (auto *r : state_.active_resources) {
+      r->cancel();
+    }
+
     JS_RunGC(JS_GetRuntime(js_ctx_));
+
+    io_ctx_.run();
+
+    auto remaining = std::move(state_.active_resources);
+    for (auto *r : remaining) {
+      delete r;
+    }
+
     JS_FreeContext(js_ctx_);
   }
 }
@@ -212,6 +226,14 @@ void SandboxContext::join() {
   }
 }
 
+void SandboxContext::registerResource(IOResource *r) {
+  state_.active_resources.insert(r);
+}
+
+void SandboxContext::unregisterResource(IOResource *r) {
+  state_.active_resources.erase(r);
+}
+
 // ─── Promise rejection tracker ─────────────────────────────────────
 
 void SandboxContext::checkUnhandledRejections() {
@@ -246,4 +268,5 @@ void SandboxContext::promiseRejectionTracker(JSContext *ctx, JSValueConst promis
 void SandboxContext::setupGlobals() {
   registerTimers(this);
   registerPrint(this);
+  registerSocket(this);
 }

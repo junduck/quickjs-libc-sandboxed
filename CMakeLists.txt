@@ -79,6 +79,7 @@ add_library(sandboxed-core STATIC
     src/primordials.cpp
     src/bindings/timers.cpp
     src/bindings/print.cpp
+    src/bindings/socket.cpp
 )
 
 target_include_directories(sandboxed-core PUBLIC include)
@@ -89,3 +90,6 @@ target_compile_features(sandboxed-core PUBLIC cxx_std_23)
 
 add_executable(sandboxed-demo demo/main.cpp)
 target_link_libraries(sandboxed-demo PRIVATE sandboxed-core)
+
+add_executable(socket-demo demo/socket_demo.cpp)
+target_link_libraries(socket-demo PRIVATE sandboxed-core)

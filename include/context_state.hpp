@@ -4,11 +4,14 @@
 #include <memory>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <boost/asio.hpp>
 
 #include "quickjs.h"
+
+struct IOResource;
 
 struct ContextState {
   // --- Timer Heap ---
@@ -48,4 +51,14 @@ struct ContextState {
     JSValue reason;
   };
   std::vector<RejectedPromise> pending_rejections;
+
+  // --- I/O Resources (sockets, etc.) ---
+  //
+  // Holds raw pointers to I/O resource structs (SocketState, etc.).
+  // These are NOT owned by ContextState — they are owned by the JSClassDef
+  // finalizer + deferred free pattern (finalized_/closed_ handshake).
+  // ContextState just holds the registry so ~SandboxContext can cancel
+  // all active I/O on shutdown.
+
+  std::unordered_set<IOResource*> active_resources;
 };
