@@ -1,0 +1,181 @@
+--- /Users/junda/agent/quickjs-libc-sandboxed/quickjs/quickjs.c	2026-05-05 15:52:41
++++ /Users/junda/agent/quickjs-libc-sandboxed/quickjs-ic/quickjs.c	2026-05-06 00:40:50
+@@ -617,7 +617,21 @@
+     JS_FUNC_ASYNC = (1 << 1),
+     JS_FUNC_ASYNC_GENERATOR = (JS_FUNC_GENERATOR | JS_FUNC_ASYNC),
+ } JSFunctionKindEnum;
++
++/* Inline cache entry for property access — direct-mapped.
++   Indexed by hash of (bc_offset, shape).  On cache hit, the full shape
++   hash lookup is skipped and the property value is read directly from
++   p->prop[slot].  Lazily populated on first miss. */
++typedef struct JSICEntry {
++    JSShape *shape;         /* expected receiver shape */
++    int16_t  slot;          /* index into p->prop[] */
++    uint16_t flags;         /* cached JS_PROP_TMASK bits */
++    uint32_t bc_offset;     /* bytecode offset of the access, for collision check */
++} JSICEntry;
+ 
++#define IC_INITIAL_SIZE  32
++#define IC_MAX_SIZE      4096
++
+ typedef struct JSFunctionBytecode {
+     JSGCObjectHeader header; /* must come first */
+     uint8_t js_mode;
+@@ -649,6 +663,11 @@
+     JSValue *cpool; /* constant pool (self pointer) */
+     int cpool_count;
+     int closure_var_count;
++    /* inline cache for property access */
++    JSICEntry *ic_table;     /* (self pointer) */
++    int ic_table_size;       /* allocated size, power of two or 0 */
++    int ic_entry_count;      /* number of live entries */
++    int ic_mask;             /* ic_table_size - 1 */
+     struct {
+         /* debug info, move to separate structure to save memory? */
+         JSAtom filename;
+@@ -17367,6 +17386,27 @@
+ #define FUNC_RET_YIELD         1
+ #define FUNC_RET_YIELD_STAR    2
+ #define FUNC_RET_INITIAL_YIELD 3
++
++/* ---- inline cache helpers ---- */
++
++static inline uint32_t ic_hash(uint32_t bc_offset, JSShape *shape)
++{
++    return ((bc_offset * 2654435761U) ^ ((uintptr_t)shape >> 4));
++}
++
++static void ic_ensure_table(JSFunctionBytecode *b, JSRuntime *rt)
++{
++    if (!b->ic_table) {
++        b->ic_table = js_mallocz_rt(rt, sizeof(JSICEntry) * IC_INITIAL_SIZE);
++        if (b->ic_table) {
++            b->ic_table_size = IC_INITIAL_SIZE;
++            b->ic_mask = IC_INITIAL_SIZE - 1;
++            b->ic_entry_count = 0;
++        }
++    }
++}
++
++/* ---- end inline cache helpers ---- */
+ 
+ /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
+ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -18733,6 +18773,7 @@
+                 JSObject *p;                                            \
+                 JSProperty *pr;                                         \
+                 JSShapeProperty *prs;                                   \
++                uint32_t bc_off;                                        \
+                                                                         \
+                 if (is_length) {                                        \
+                     atom = JS_ATOM_length;                              \
+@@ -18744,19 +18785,41 @@
+                 obj = sp[-1];                                           \
+                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {   \
+                     p = JS_VALUE_GET_OBJ(obj);                          \
++                    if (!is_length && b->ic_table) {                    \
++                        bc_off = (uint32_t)(pc - b->byte_code_buf - 5); \
++                        uint32_t ic_idx = (ic_hash(bc_off, p->shape)    \
++                                           & b->ic_mask);               \
++                        JSICEntry *ic_ = &b->ic_table[ic_idx];          \
++                        if (ic_->shape == p->shape                      \
++                            && ic_->bc_offset == bc_off                 \
++                            && (ic_->flags & JS_PROP_TMASK) == 0        \
++                            && get_shape_prop(p->shape)[ic_->slot].atom == atom) { \
++                            val = JS_DupValue(ctx, p->prop[ic_->slot].u.value); \
++                            goto name ## _ic_done;                      \
++                        }                                               \
++                    }                                                   \
+                     for(;;) {                                           \
+                         prs = find_own_property(&pr, p, atom);          \
+                         if (prs) {                                      \
+                             /* found */                                 \
+                             if (unlikely(prs->flags & JS_PROP_TMASK))   \
+                                     goto name ## _slow_path;            \
++                            if (!is_length) {                           \
++                                ic_ensure_table(b, rt);                 \
++                                if (b->ic_table) {                      \
++                                    uint32_t ic_idx2 = (ic_hash(bc_off,p->shape) \
++                                                        & b->ic_mask);  \
++                                    JSICEntry *ic2 = &b->ic_table[ic_idx2]; \
++                                    ic2->shape = p->shape;              \
++                                    ic2->slot = (int16_t)(pr - p->prop); \
++                                    ic2->flags = prs->flags;            \
++                                    ic2->bc_offset = bc_off;            \
++                                }                                       \
++                            }                                           \
+                             val = JS_DupValue(ctx, pr->u.value);        \
+                             break;                                      \
+                         }                                               \
+                         if (unlikely(p->is_exotic)) {                   \
+-                            /* XXX: should avoid the slow path for arrays \
+-                               and typed arrays by ensuring that 'prop' is \
+-                               not numeric */                           \
+                             obj = JS_MKPTR(JS_TAG_OBJECT, p);           \
+                             goto name ## _slow_path;                    \
+                         }                                               \
+@@ -18773,6 +18836,7 @@
+                     if (unlikely(JS_IsException(val)))                  \
+                         goto exception;                                 \
+                 }                                                       \
++                name ## _ic_done:                                       \
+                 if (keep) {                                             \
+                     *sp++ = val;                                        \
+                 } else {                                                \
+@@ -18804,6 +18868,7 @@
+                 JSObject *p;
+                 JSProperty *pr;
+                 JSShapeProperty *prs;
++                uint32_t bc_off;
+ 
+                 atom = get_u32(pc);
+                 pc += 4;
+@@ -18811,12 +18876,37 @@
+                 obj = sp[-2];
+                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {
+                     p = JS_VALUE_GET_OBJ(obj);
++                    bc_off = (uint32_t)(pc - b->byte_code_buf - 5);
++                    if (b->ic_table) {
++                        uint32_t ic_idx = (ic_hash(bc_off, p->shape)
++                                           & b->ic_mask);
++                        JSICEntry *ic_ = &b->ic_table[ic_idx];
++                        if (ic_->shape == p->shape
++                            && ic_->bc_offset == bc_off
++                            && (ic_->flags & (JS_PROP_TMASK | JS_PROP_WRITABLE |
++                                              JS_PROP_LENGTH)) == JS_PROP_WRITABLE
++                            && get_shape_prop(p->shape)[ic_->slot].atom == atom) {
++                            set_value(ctx, &p->prop[ic_->slot].u.value, sp[-1]);
++                            JS_FreeValue(ctx, obj);
++                            sp -= 2;
++                            BREAK;
++                        }
++                    }
+                     prs = find_own_property(&pr, p, atom);
+                     if (!prs)
+                         goto put_field_slow_path;
+                     if (likely((prs->flags & (JS_PROP_TMASK | JS_PROP_WRITABLE |
+                                               JS_PROP_LENGTH)) == JS_PROP_WRITABLE)) {
+-                        /* fast path */
++                        ic_ensure_table(b, rt);
++                        if (b->ic_table) {
++                            uint32_t ic_idx2 = (ic_hash(bc_off, p->shape)
++                                                & b->ic_mask);
++                            JSICEntry *ic2 = &b->ic_table[ic_idx2];
++                            ic2->shape = p->shape;
++                            ic2->slot = (int16_t)(pr - p->prop);
++                            ic2->flags = prs->flags;
++                            ic2->bc_offset = bc_off;
++                        }
+                         set_value(ctx, &pr->u.value, sp[-1]);
+                     } else {
+                         goto put_field_slow_path;
+@@ -35733,6 +35823,8 @@
+         js_free_rt(rt, b->debug.pc2line_buf);
+         js_free_rt(rt, b->debug.source);
+     }
++    if (b->ic_table)
++        js_free_rt(rt, b->ic_table);
+ 
+     remove_gc_object(&b->header);
+     if (rt->gc_phase == JS_GC_PHASE_REMOVE_CYCLES && b->header.ref_count != 0) {
