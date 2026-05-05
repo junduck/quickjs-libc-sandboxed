@@ -11,7 +11,7 @@
 
 #include "quickjs.h"
 
-struct IOResource;
+#include "qjsb/cancelable.hpp"
 
 struct ContextState {
   // --- Timer Heap ---
@@ -60,5 +60,5 @@ struct ContextState {
   // ContextState just holds the registry so ~SandboxContext can cancel
   // all active I/O on shutdown.
 
-  std::unordered_set<IOResource*> active_resources;
+  std::unordered_set<qjsb::IOResource*> active_resources;
 };

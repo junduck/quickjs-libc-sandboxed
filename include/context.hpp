@@ -11,8 +11,7 @@
 
 #include "context_state.hpp"
 #include "primordials.hpp"
-
-struct IOResource;
+#include "qjsb/cancelable.hpp"
 
 struct JsError : std::runtime_error {
   using std::runtime_error::runtime_error;
@@ -37,8 +36,8 @@ public:
   void cancelTimer(int64_t id);
 
   // --- I/O Resource registry ---
-  void registerResource(IOResource *r);
-  void unregisterResource(IOResource *r);
+  void registerResource(qjsb::IOResource *r);
+  void unregisterResource(qjsb::IOResource *r);
 
   // --- Error helpers ---
   void assertOk(JSValue v);

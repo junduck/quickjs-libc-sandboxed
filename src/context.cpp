@@ -1,15 +1,15 @@
 #include "context.hpp"
-#include "io_resource.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 
+#include "qjsb/modules/socket.hpp"
+
 using namespace std::chrono;
 
 void registerTimers(SandboxContext *sctx);
 void registerPrint(SandboxContext *sctx);
-void registerSocket(SandboxContext *sctx);
 
 // ─── Error helpers ─────────────────────────────────────────────────
 
@@ -74,6 +74,7 @@ SandboxContext::~SandboxContext() {
 
     auto remaining = std::move(state_.active_resources);
     for (auto *r : remaining) {
+      r->forceCleanup(js_ctx_);
       delete r;
     }
 
@@ -226,11 +227,11 @@ void SandboxContext::join() {
   }
 }
 
-void SandboxContext::registerResource(IOResource *r) {
+void SandboxContext::registerResource(qjsb::IOResource *r) {
   state_.active_resources.insert(r);
 }
 
-void SandboxContext::unregisterResource(IOResource *r) {
+void SandboxContext::unregisterResource(qjsb::IOResource *r) {
   state_.active_resources.erase(r);
 }
 
@@ -268,5 +269,5 @@ void SandboxContext::promiseRejectionTracker(JSContext *ctx, JSValueConst promis
 void SandboxContext::setupGlobals() {
   registerTimers(this);
   registerPrint(this);
-  registerSocket(this);
+  qjsb::modules::SocketModule::registerWith(this);
 }

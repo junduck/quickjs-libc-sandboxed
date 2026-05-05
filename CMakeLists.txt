@@ -79,7 +79,8 @@ add_library(sandboxed-core STATIC
     src/primordials.cpp
     src/bindings/timers.cpp
     src/bindings/print.cpp
-    src/bindings/socket.cpp
+    src/transport/tcp.cpp
+    src/modules/socket.cpp
 )
 
 target_include_directories(sandboxed-core PUBLIC include)
